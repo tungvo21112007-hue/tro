@@ -1,8 +1,8 @@
 """
 pipeline.py – Điều phối toàn bộ chu trình:
   1. Thu thập dữ liệu từ fb_crawler + web_crawler
-  2. Lọc URL trùng với database (tiết kiệm token Gemini)
-  3. Phân tích qua ai_filter (Gemini 2.5 Flash)
+  2. Lọc URL trùng với database (tiết kiệm token OpenRouter)
+  3. Phân tích qua ai_filter (OpenRouter)
   4. Lưu bài hợp lệ vào SQLite
   5. Chạy tự động mỗi 30 phút bằng APScheduler
 """
@@ -17,7 +17,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from ai_filter import analyze_rental
 from database import init_db, insert_rental, url_exists
 from fb_crawler import crawl_fb_groups
-from web_crawler import crawl_phongtro123
+from web_crawler import crawl_chotot, crawl_phongtro123
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,13 +39,14 @@ def _collect_all() -> List[Dict[str, Any]]:
     except Exception as e:
         log.error("Lỗi khi cào Facebook: %s", e)
 
-    # Phongtro123
-    try:
-        web_items = crawl_phongtro123()
-        log.info("Phongtro123: thu được %d bài.", len(web_items))
-        all_items.extend(web_items)
-    except Exception as e:
-        log.error("Lỗi khi cào Phongtro123: %s", e)
+    # Sàn BĐS: mỗi nguồn lỗi độc lập, không làm hỏng nguồn khác
+    for name, fn in (("Phongtro123", crawl_phongtro123), ("Chợ Tốt", crawl_chotot)):
+        try:
+            items = fn()
+            log.info("%s: thu được %d bài.", name, len(items))
+            all_items.extend(items)
+        except Exception as e:
+            log.error("Lỗi khi cào %s: %s", name, e)
 
     log.info("Tổng cộng thu thập: %d bài từ tất cả nguồn.", len(all_items))
     return all_items
@@ -76,7 +77,7 @@ def _filter_new_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ── Bước 3 + 4: Phân tích AI & lưu DB ────────────────────────────────
 def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
     """
-    Gửi từng bài qua Gemini để phân loại, chỉ lưu bài hợp lệ vào SQLite.
+    Gửi từng bài qua OpenRouter để phân loại, chỉ lưu bài hợp lệ vào SQLite.
     Trả về thống kê {saved, spam, invalid, error}.
     """
     stats = {"saved": 0, "spam": 0, "invalid": 0, "error": 0}
@@ -143,7 +144,7 @@ def run_pipeline() -> None:
         log.info("Không có bài đăng mới nào. Kết thúc chu trình.")
         return
 
-    # 2. Lọc URL trùng (tiết kiệm token Gemini)
+    # 2. Lọc URL trùng (tiết kiệm token OpenRouter)
     new_items = _filter_new_items(raw_items)
     if not new_items:
         log.info("Tất cả URL đã có trong DB. Không cần gọi AI. Kết thúc chu trình.")

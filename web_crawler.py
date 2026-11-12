@@ -1,189 +1,152 @@
 """
-web_crawler.py – Cào danh sách tin cho thuê phòng trọ khu vực Đà Nẵng
-từ phongtro123.com sử dụng crawlee (BeautifulSoupCrawler).
+web_crawler.py – Thu thập tin cho thuê phòng trọ Đà Nẵng từ:
+  * Phongtro123 (requests + BeautifulSoup, đọc HTML)
+  * Chợ Tốt / nhatot.com (API JSON công khai gateway.chotot.com)
+Đầu ra mỗi nguồn: list[dict] {title, raw_content, url, source, posted_time}
 """
 
-import asyncio
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List
-from urllib.parse import urljoin
 
-from crawlee.crawlers import BeautifulSoupCrawler, BeautifulSoupCrawlingContext
+import requests
+from bs4 import BeautifulSoup
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("web_crawler")
 
-BASE_URL = "https://phongtro123.com"
-START_URL = f"{BASE_URL}/tinh/da-nang"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "vi-VN,vi;q=0.9",
+}
+TIMEOUT = 20
 
-# Biến tích lũy kết quả xuyên suốt phiên crawl
-_collected_items: List[Dict[str, Any]] = []
+# ── Phongtro123 ──────────────────────────────────────────────────────
+PT_BASE = "https://phongtro123.com"
+PT_LIST_URL = f"{PT_BASE}/tinh-thanh/da-nang"  # URL có dấu cũ trả 410 Gone
+PT_TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s+(\d{1,2}/\d{1,2}/\d{4})")
 
 
-def _parse_relative_time(raw_text: str) -> str:
-    """
-    Chuyển chuỗi thời gian tương đối trên trang (ví dụ "Hôm nay", "2 ngày trước",
-    "1 tuần trước") thành ISO 8601 datetime. Fallback = thời điểm hiện tại.
-    """
-    now = datetime.now()
-    text = raw_text.strip().lower()
-
-    if "hôm nay" in text:
-        return now.isoformat()
-    if "hôm qua" in text:
-        return (now - timedelta(days=1)).isoformat()
-
-    # "X phút trước", "X giờ trước", "X ngày trước", "X tuần trước", "X tháng trước"
-    match = re.search(r"(\d+)\s*(phút|giờ|ngày|tuần|tháng)", text)
-    if match:
-        amount = int(match.group(1))
-        unit = match.group(2)
-        delta_map = {
-            "phút": timedelta(minutes=amount),
-            "giờ": timedelta(hours=amount),
-            "ngày": timedelta(days=amount),
-            "tuần": timedelta(weeks=amount),
-            "tháng": timedelta(days=amount * 30),
-        }
-        delta = delta_map.get(unit, timedelta())
-        return (now - delta).isoformat()
-
-    # Thử parse trực tiếp các dạng dd/mm/yyyy
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+def _pt_time(item) -> str:
+    """Đọc thời gian tuyệt đối trong <time title="Thứ 5, 16:45 12/11/2026">."""
+    el = item.select_one("time")
+    m = PT_TIME_RE.search((el.get("title") or "") if el else "")
+    if m:
         try:
-            return datetime.strptime(text, fmt).isoformat()
+            return datetime.strptime(f"{m.group(2)} {m.group(1)}", "%d/%m/%Y %H:%M").isoformat()
         except ValueError:
-            continue
-
-    return now.isoformat()
-
-
-def _build_raw_content(price: str, acreage: str, location: str, summary: str) -> str:
-    """Ghép nối các trường thành chuỗi raw_content mô tả bài đăng."""
-    parts = [p.strip() for p in [price, acreage, location, summary] if p and p.strip()]
-    return " | ".join(parts) if parts else ""
+            pass
+    return datetime.now().isoformat()  # shortcut: không đọc được giờ thì dùng giờ cào
 
 
-async def _run_crawler(
-    start_url: str = START_URL,
-    max_requests: int = 30,
-) -> None:
-    """Khởi chạy BeautifulSoupCrawler, lưu kết quả vào _collected_items."""
-    global _collected_items
-    _collected_items = []
+def crawl_phongtro123(pages: int = 2) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    seen = set()
 
-    crawler = BeautifulSoupCrawler(
-        max_requests_per_crawl=max_requests,
-    )
-
-    @crawler.router.default_handler
-    async def request_handler(context: BeautifulSoupCrawlingContext) -> None:
-        soup = context.soup
-        context.log.info(f"Đang xử lý: {context.request.url}")
-
-        # --- Trích xuất danh sách bài đăng ---
-        # phongtro123 dùng .post-item hoặc .js-post-item làm container mỗi tin.
-        # Fallback qua nhiều selector phòng trường hợp trang đổi class.
-        post_items = (
-            soup.select("div.post-item")
-            or soup.select("li.post-item")
-            or soup.select("section.post-listing div[class*='post']")
-            or soup.select("ul.post-listing > li")
-        )
-
-        if not post_items:
-            context.log.warning(
-                f"Không tìm thấy bài đăng nào tại {context.request.url}. "
-                "Có thể CSS selector đã thay đổi — kiểm tra lại bằng Inspect (F12)."
+    for page in range(1, pages + 1):
+        try:
+            resp = requests.get(
+                PT_LIST_URL, params={"page": page} if page > 1 else None,
+                headers=HEADERS, timeout=TIMEOUT,
             )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            log.error("Phongtro123 trang %d lỗi: %s", page, e)
+            break
 
-        for item in post_items:
-            # Tiêu đề + link chi tiết
-            title_el = (
-                item.select_one("h3.post-title a")
-                or item.select_one(".post-title a")
-                or item.select_one("h3 a")
-            )
-            title = title_el.get_text(strip=True) if title_el else ""
-            relative_url = title_el.get("href", "") if title_el else ""
-            detail_url = urljoin(BASE_URL, relative_url) if relative_url else ""
-
-            # Giá, diện tích, khu vực
-            price_el = item.select_one(".post-price") or item.select_one("span[class*='price']")
-            price_text = price_el.get_text(strip=True) if price_el else ""
-
-            acreage_el = item.select_one(".post-acreage") or item.select_one("span[class*='acreage']")
-            acreage_text = acreage_el.get_text(strip=True) if acreage_el else ""
-
-            location_el = item.select_one(".post-location") or item.select_one("span[class*='location']")
-            location_text = location_el.get_text(strip=True) if location_el else ""
-
-            # Mô tả ngắn
-            summary_el = item.select_one(".post-summary") or item.select_one("p[class*='summary']")
-            summary_text = summary_el.get_text(strip=True) if summary_el else ""
-
-            # Thời gian đăng
-            time_el = item.select_one(".post-time") or item.select_one("span[class*='time']")
-            raw_time = time_el.get_text(strip=True) if time_el else ""
-
-            # Bỏ qua mục không có tiêu đề hoặc URL
-            if not title or not detail_url:
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for item in soup.select("ul.post__listing > li"):
+            link = item.select_one("h3 a[href]")
+            if not link:
                 continue
+            url = PT_BASE + link["href"] if link["href"].startswith("/") else link["href"]
+            if url in seen:
+                continue
+            seen.add(url)
 
-            raw_content = _build_raw_content(price_text, acreage_text, location_text, summary_text)
+            title = link.get_text(" ", strip=True)
+            price = item.select_one(".text-green")
+            geo = item.select_one(".geo-alt")
+            location = geo.parent.get_text(" ", strip=True) if geo else ""
+            summary = item.select_one("p.text-secondary")
+            parts = [
+                title,
+                price.get_text(strip=True) if price else "",
+                location,
+                summary.get_text(" ", strip=True) if summary else "",
+            ]
+            results.append({
+                "title": title[:50],
+                "raw_content": " | ".join(p for p in parts if p),
+                "url": url,
+                "source": "Phongtro123",
+                "posted_time": _pt_time(item),
+            })
 
-            _collected_items.append(
-                {
-                    "title": title[:50],
-                    "raw_content": raw_content or title,
-                    "url": detail_url,
-                    "source": "Phongtro123",
-                    "posted_time": _parse_relative_time(raw_time) if raw_time else datetime.now().isoformat(),
-                }
+    log.info("Phongtro123: %d tin.", len(results))
+    return results
+
+
+# ── Chợ Tốt (nhatot.com) ─────────────────────────────────────────────
+CHOTOT_API = "https://gateway.chotot.com/v1/public/ad-listing"
+CHOTOT_PARAMS = {
+    "cg": 1050,          # danh mục: Phòng trọ
+    "region_v2": 3017,   # Đà Nẵng
+    "st": "u",           # u = cho thuê
+    "limit": 20,
+}
+
+
+def crawl_chotot(pages: int = 2) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+
+    for page in range(pages):
+        try:
+            resp = requests.get(
+                CHOTOT_API, params={**CHOTOT_PARAMS, "o": page * CHOTOT_PARAMS["limit"]},
+                headers=HEADERS, timeout=TIMEOUT,
             )
+            resp.raise_for_status()
+            ads = resp.json().get("ads", [])
+        except (requests.RequestException, ValueError) as e:
+            log.error("Chợ Tốt offset %d lỗi: %s", page, e)
+            break
+        if not ads:
+            break
 
-        # --- Phân trang: enqueue trang tiếp theo ---
-        next_link = (
-            soup.select_one("a.page-link[rel='next']")
-            or soup.select_one("li.page-item.active + li a")
-            or soup.select_one("a[title='Trang sau']")
-        )
-        if next_link and next_link.get("href"):
-            next_url = urljoin(BASE_URL, next_link["href"])
-            context.log.info(f"Tìm thấy trang tiếp theo: {next_url}")
-            await context.add_requests([next_url])
+        for ad in ads:
+            list_id = ad.get("list_id")
+            if not list_id:
+                continue
+            subject = (ad.get("subject") or "").strip()
+            price = ad.get("price_string") or (f"{ad['price']:,}đ" if ad.get("price") else "")
+            size = f"{ad['size']} m²" if ad.get("size") else ""
+            location = ", ".join(x for x in (ad.get("ward_name"), ad.get("area_name"), ad.get("region_name")) if x)
+            parts = [subject, price, size, location, (ad.get("body") or "").strip()]
 
-    await crawler.run([start_url])
+            ts = ad.get("list_time")  # epoch mili-giây
+            results.append({
+                "title": subject[:50],
+                "raw_content": " | ".join(p for p in parts if p),
+                "url": f"https://www.nhatot.com/{list_id}.htm",
+                "source": "Chotot",
+                "posted_time": (
+                    datetime.fromtimestamp(ts / 1000).isoformat() if ts else datetime.now().isoformat()
+                ),
+            })
 
-
-def crawl_phongtro123(
-    start_url: str = START_URL,
-    max_requests: int = 30,
-) -> List[Dict[str, Any]]:
-    """
-    Hàm đồng bộ cào tin cho thuê từ phongtro123.com khu vực Đà Nẵng.
-
-    Returns:
-        Danh sách dict cùng cấu trúc với fb_crawler.py:
-        {title, raw_content, url, source, posted_time}
-    """
-    asyncio.run(_run_crawler(start_url=start_url, max_requests=max_requests))
-
-    logging.info("Phongtro123: Thu thập được %d bài đăng hợp lệ.", len(_collected_items))
-    return list(_collected_items)
+    log.info("Chợ Tốt: %d tin.", len(results))
+    return results
 
 
 if __name__ == "__main__":
-    results = crawl_phongtro123()
-    for i, post in enumerate(results[:5], 1):
-        print(f"\n--- Bài #{i} ---")
-        print(f"  Title:  {post['title']}")
-        print(f"  URL:    {post['url']}")
-        print(f"  Source: {post['source']}")
-        print(f"  Time:   {post['posted_time']}")
-        print(f"  Content: {post['raw_content'][:120]}")
-    print(f"\nTổng cộng: {len(results)} bài đăng.")
+    for name, fn in (("Phongtro123", crawl_phongtro123), ("Chotot", crawl_chotot)):
+        data = fn()
+        print(f"\n== {name}: {len(data)} tin ==")
+        for p in data[:2]:
+            print(p["posted_time"], "|", p["title"], "|", p["url"])
+            print("   ", p["raw_content"][:140])

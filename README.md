@@ -1,62 +1,70 @@
 # Đà Nẵng Rental Aggregator 🏠
 
-Hệ thống tự động thu thập tin cho thuê phòng trọ, căn hộ tại Đà Nẵng từ Facebook Groups và Phongtro123, lọc tin rác và chuẩn hóa dữ liệu bằng Gemini AI (Gemini 2.5 Flash qua OpenRouter), lưu trữ vào SQLite và cung cấp Dashboard trực quan với Streamlit.
+Tự động thu thập tin cho thuê phòng trọ Đà Nẵng từ Phongtro123, Chợ Tốt và Facebook Groups, lọc tin rác bằng AI (OpenRouter), lưu SQLite và xem qua dashboard Streamlit. Toàn bộ mã nguồn mở, không dùng dịch vụ cào trả phí.
 
-## 🚀 Tính năng chính
+## Kiến trúc
 
-- **Đa nguồn thu thập**:
-  - `fb_crawler.py`: Cào bài viết từ Facebook Groups bằng Playwright (cần đăng nhập 1 lần: `python fb_crawler.py --login`).
-  - `web_crawler.py`: Cào tin từ `phongtro123.com` sử dụng Crawlee (`BeautifulSoupCrawler`).
-- **AI lọc rác & chuẩn hóa** (`ai_filter.py`):
-  - Nhận diện tin cho thuê thật vs. tin tìm phòng / pass đồ / quảng cáo.
-  - Phát hiện giá ảo, tin câu tương tác, tin spam.
-  - Tự động chuẩn hóa mức giá về VNĐ/tháng và map địa chỉ về 7 quận Đà Nẵng.
-- **Tối ưu chi phí & Lập lịch tự động** (`pipeline.py`):
-  - Kiểm tra trùng lặp URL trước khi gọi AI để tiết kiệm tối đa token.
-  - Lập lịch quét tự động định kỳ mỗi 30 phút bằng `APScheduler`.
-- **Giao diện tìm kiếm trực quan** (`app.py`):
-  - Streamlit dashboard với bộ lọc đa tiêu chí: Quận (multiselect), khoảng giá, thời gian đăng, nguồn tin, từ khóa.
-  - Nút kích hoạt quét tin mới thủ công và liên kết trực tiếp tới bài đăng gốc.
-
-## 📁 Cấu trúc thư mục
-
-```text
-Danang-Rental-Aggregator/
-├── requirements.txt   # Danh sách thư viện cần thiết
-├── database.py        # Thao tác SQLite (bảng rentals)
-├── fb_crawler.py      # Module cào Facebook Groups bằng Playwright
-├── web_crawler.py     # Module cào Phongtro123 qua Crawlee
-├── ai_filter.py       # Module lọc rác & chuẩn hóa bằng Gemini 2.5 Flash qua OpenRouter
-├── pipeline.py        # Pipeline điều phối & scheduler
-└── app.py             # Giao diện Streamlit Dashboard
+```
+web_crawler.py  (Phongtro123: requests+BS4 | Chợ Tốt: API JSON) ─┐
+fb_crawler.py   (Facebook Groups: Playwright)                    ─┴► pipeline.py
+      url_exists()? ─ đã có ─► bỏ qua (không tốn token)
+            │ chưa có
+            ▼
+      ai_filter.py (OpenRouter, Pydantic schema)
+            │ is_valid_rental == True và is_spam == False
+            ▼
+      database.py (SQLite rentals.db) ◄── app.py (Streamlit)
+      APScheduler: chạy lại mỗi 30 phút
 ```
 
-## ⚙️ Cài đặt & Sử dụng
+| File | Vai trò |
+|---|---|
+| `web_crawler.py` | `crawl_phongtro123()` đọc HTML `phongtro123.com/tinh-thanh/da-nang`; `crawl_chotot()` gọi `gateway.chotot.com/v1/public/ad-listing` (danh mục phòng trọ, Đà Nẵng). Thời gian đăng lấy chính xác từ trang/API. |
+| `fb_crawler.py` | `crawl_fb_groups()` dùng Playwright mở group, cuộn trang, lấy nội dung + link bài. |
+| `ai_filter.py` | `analyze_rental()` gọi OpenRouter, trả `is_valid_rental`, `is_spam`, `price_vnd`, `district`, `room_type`. |
+| `database.py` | Bảng `rentals`, `insert_rental()` (`INSERT OR IGNORE`), `url_exists()`, `get_rentals(filters)`. |
+| `pipeline.py` | ETL + APScheduler 30 phút/lần. |
+| `app.py` | Dashboard: lọc Quận, Giá, Thời gian, Nguồn, Từ khóa; nút "Quét tin mới ngay". |
 
-### 1. Cài đặt môi trường
+## Cài đặt
 
 ```bash
-git clone https://github.com/tungvo21112007-hue/tro.git
-cd tro
+git clone https://github.com/tungvo21112007-hue/tro.git && cd tro
 pip install -r requirements.txt
+playwright install chromium
+
+cp .env.example .env        # điền OPENROUTER_API_KEY (https://openrouter.ai/keys)
+set -a; source .env; set +a # nạp biến môi trường vào shell hiện tại
 ```
 
-### 2. Thiết lập biến môi trường
+Biến môi trường:
+
+| Biến | Ý nghĩa |
+|---|---|
+| `OPENROUTER_API_KEY` | Bắt buộc. |
+| `OPENROUTER_MODEL` | Mặc định `google/gemini-2.5-flash`. |
+| `FB_GROUP_URLS` | Tùy chọn, URL các Facebook Group, ngăn cách bằng dấu phẩy. |
+
+## Facebook (đọc kỹ)
+
+Facebook thường chặn người chưa đăng nhập, kể cả với group công khai. Đăng nhập một lần, session lưu ở `fb_profile/` (đã `.gitignore`):
 
 ```bash
-playwright install chromium
-cp .env.example .env   # rồi điền OPENROUTER_API_KEY
-export OPENROUTER_API_KEY="your_openrouter_api_key"
+python fb_crawler.py --login   # đăng nhập tay rồi nhấn Enter
+python fb_crawler.py --show    # chạy thử có hiện trình duyệt
 ```
 
-### 3. Vận hành
+Chưa đăng nhập thì crawler cảnh báo và bỏ qua group; Phongtro123 và Chợ Tốt vẫn chạy bình thường. Dùng tài khoản phụ, vì tự động hóa có thể vi phạm điều khoản Facebook. Thời gian đăng của bài Facebook hiện là giờ lúc cào.
 
-- **Chạy pipeline thu thập & lập lịch tự động**:
-  ```bash
-  python pipeline.py
-  ```
+## Chạy
 
-- **Khởi động Web Dashboard**:
-  ```bash
-  streamlit run app.py
-  ```
+```bash
+python web_crawler.py     # thử riêng crawler web (không cần API key)
+python pipeline.py        # chạy ngay 1 lần, sau đó lặp mỗi 30 phút
+streamlit run app.py      # mở dashboard
+```
+
+## Lưu ý
+
+- Selector Phongtro123 và tham số Chợ Tốt (`cg=1050`, `region_v2=3017`) có thể đổi theo thời gian; `python web_crawler.py` giúp kiểm tra nhanh.
+- Tin có `price_vnd` rỗng ("thỏa thuận") sẽ bị loại khi lọc theo khoảng giá trong dashboard.

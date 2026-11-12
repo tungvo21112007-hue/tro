@@ -1,9 +1,8 @@
 openai
-playwright
 beautifulsoup4
 requests
-crawlee[beautifulsoup]
-pydantic
+playwright
 streamlit
 pandas
 apscheduler
+pydantic

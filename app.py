@@ -31,7 +31,7 @@ DANANG_DISTRICTS = [
     "Hòa Vang",
 ]
 
-SOURCE_OPTIONS = ["Facebook", "Phongtro123"]
+SOURCE_OPTIONS = ["Facebook", "Phongtro123", "Chotot"]
 
 TIME_PRESETS = {
     "24 giờ qua": timedelta(hours=24),
@@ -154,7 +154,7 @@ rows = get_rentals(filters)
 #  KHU VỰC CHÍNH
 # ══════════════════════════════════════════════════════════════════════
 st.title("🏠 Phòng trọ Đà Nẵng")
-st.caption("Tổng hợp tin cho thuê từ Facebook Groups & Phongtro123")
+st.caption("Tổng hợp tin cho thuê từ Facebook Groups, Phongtro123 & Chợ Tốt")
 
 # ── Thanh điều khiển ─────────────────────────────────────────────────
 col_count, col_btn = st.columns([3, 1])
