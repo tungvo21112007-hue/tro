@@ -277,7 +277,16 @@ def crawl_fb_groups(
     """
     Cào bài viết từ các Facebook Group phòng trọ Đà Nẵng.
     Kỹ thuật chống chặn đa tầng, log chẩn đoán chi tiết.
+    Tự động bỏ qua trên Cloud/Datacenter IPs để tránh bị Facebook chặn.
     """
+    force_fb = os.getenv("FORCE_FB_SCRAPE", "").lower() in ("true", "1", "yes")
+    is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
+    is_linux_cloud = sys.platform.startswith("linux")
+
+    if (is_github_actions or is_linux_cloud) and not force_fb:
+        log.info("Bỏ qua Facebook crawler trên môi trường Cloud do Facebook chặn IP datacenter.")
+        return []
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:

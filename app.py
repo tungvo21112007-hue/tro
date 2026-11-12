@@ -336,7 +336,7 @@ with col_title:
     st.caption("Cập nhật tự động từ Facebook Groups, Phongtro123 & Chợ Tốt • Lọc sạch 0 tốn token AI")
 
 with col_action:
-    if st.button("🔄 Quét tin mới ngay", use_container_width=True, type="primary"):
+    if st.button("🔄 Quét tin mới ngay", width="stretch", type="primary"):
         _run_pipeline_manual()
         st.toast("Đang tiến hành cào tin mới từ các nguồn…", icon="⏳")
         st.info("⏳ **Đang cào dữ liệu trong nền!**\n\nHãy theo dõi tab **Manage app** (Logs) hoặc đợi 1–2 phút rồi nhấn `F5` để tải lại dữ liệu mới nhất.")
@@ -389,7 +389,7 @@ else:
 
             # Cột trái: Ảnh đại diện
             with col_img:
-                st.image(image_url, use_container_width=True)
+                st.image(image_url, width="stretch")
 
             # Cột phải: Thông tin chi tiết
             with col_info:
@@ -423,7 +423,7 @@ else:
                         st.caption("📞 SĐT: *Xem trong bài đăng gốc*")
 
                 with c_btn:
-                    st.link_button("🔗 Xem bài gốc", url, use_container_width=True)
+                    st.link_button("🔗 Xem bài gốc", url, width="stretch")
 
                 # Nội dung rút gọn có thể mở rộng
                 if content:
