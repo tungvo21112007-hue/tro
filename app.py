@@ -85,12 +85,18 @@ def _format_time(iso_str) -> str:
 
 
 def _run_pipeline_manual():
-    """Gọi pipeline.run_pipeline() trong subprocess để không block Streamlit."""
+    """
+    Gọi pipeline.py --once trong subprocess không block Streamlit.
+    Sử dụng sys.executable để luôn dùng đúng Python của môi trường ảo (Streamlit Cloud).
+    Kế thừa stdout/stderr để hiển thị log trực tiếp trên console Manage App.
+    """
     cwd = Path(__file__).resolve().parent
     subprocess.Popen(
-        [sys.executable, "-c", "from pipeline import run_pipeline; run_pipeline()"],
+        [sys.executable, "pipeline.py", "--once"],
         cwd=cwd,
         env=os.environ.copy(),
+        stdout=None,
+        stderr=None,
     )
 
 
@@ -181,8 +187,13 @@ with col_count:
 
 with col_btn:
     if st.button("🔄 Quét tin mới ngay", use_container_width=True):
-        _run_pipeline_manual()
-        st.toast("Đang chạy pipeline quét tin mới… Tải lại trang sau 1–2 phút.", icon="⏳")
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key or not api_key.strip():
+            st.error("Chưa cấu hình OPENROUTER_API_KEY trong Streamlit Secrets!")
+        else:
+            _run_pipeline_manual()
+            st.toast("Đang chạy pipeline quét tin mới… Vui lòng đợi 1–2 phút rồi tải lại trang.", icon="⏳")
+            st.info("⏳ **Đang tiến hành cào và lọc tin mới trong nền!**\n\nBạn có thể theo dõi tiến trình trong phần **Manage app** (Logs) của Streamlit Cloud. Sau khoảng 1–2 phút, hãy nhấn `F5` hoặc tải lại trang để cập nhật danh sách phòng mới.")
 
 st.divider()
 

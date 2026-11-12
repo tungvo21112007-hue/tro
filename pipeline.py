@@ -176,6 +176,13 @@ def main() -> None:
     init_db()
     log.info("Database sẵn sàng.")
 
+    # Chạy một lần duy nhất nếu có cờ --once (ví dụ gọi từ Streamlit Cloud)
+    if "--once" in sys.argv:
+        log.info("Chế độ chạy một lần (--once). Bắt đầu quét...")
+        run_pipeline()
+        log.info("Hoàn tất quét một lần. Kết thúc tiến trình.")
+        return
+
     # Chạy ngay lần đầu
     run_pipeline()
 
