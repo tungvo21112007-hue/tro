@@ -54,10 +54,15 @@ playwright install chromium
   streamlit run app.py
   ```
 
-## 👥 Facebook Crawler (Tùy chọn)
+## 👥 Facebook Crawler (Hỗ trợ Cookie & Cloud)
 
-Facebook thường yêu cầu đăng nhập đối với một số nhóm. Bạn có thể đăng nhập 1 lần để lưu session ở thư mục `fb_profile/`:
+Facebook thường yêu cầu đăng nhập đối với một số nhóm. Bạn có thể đăng nhập 1 lần trên máy local:
 ```bash
-python fb_crawler.py --login   # đăng nhập tay rồi nhấn Enter
+python fb_crawler.py --login
 ```
-Nếu chưa đăng nhập hoặc trên môi trường Cloud không có browser, crawler Facebook sẽ tự động bỏ qua an toàn mà không làm ảnh hưởng đến nguồn Phongtro123 và Chợ Tốt.
+- Trình duyệt sẽ mở ra trang Facebook. Sau khi đăng nhập, hệ thống sẽ tự động phát hiện và lưu session vào `fb_profile/` đồng thời xuất toàn bộ cookies ra file `fb_cookies.json`.
+- **Triển khai trên Streamlit Cloud**: Sao chép nội dung file `fb_cookies.json` và dán vào Streamlit Secrets:
+  ```toml
+  FB_COOKIES_JSON = '''[ ... ]'''
+  ```
+- Nếu chưa đăng nhập hoặc trên môi trường Cloud không có browser, crawler Facebook sẽ tự động bỏ qua an toàn mà không làm ảnh hưởng đến nguồn Phongtro123 và Chợ Tốt.

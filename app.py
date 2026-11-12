@@ -15,7 +15,7 @@ import streamlit as st
 # ── Đồng bộ Streamlit Secrets sang os.environ (Hỗ trợ Streamlit Cloud) ─
 try:
     if hasattr(st, "secrets"):
-        for key in ["FB_GROUP_URLS"]:
+        for key in ["FB_GROUP_URLS", "FB_COOKIES_JSON"]:
             if key in st.secrets and not os.environ.get(key):
                 os.environ[key] = str(st.secrets[key])
         for k, v in getattr(st.secrets, "_secrets", {}).items():
