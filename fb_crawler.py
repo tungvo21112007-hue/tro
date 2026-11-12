@@ -40,7 +40,7 @@ DEFAULT_GROUP_URLS = [
 ]
 
 DEFAULT_RESULTS_LIMIT = 20
-POST_LINK_RE = re.compile(r"/(posts|permalink)/\d+|story_fbid=|/groups/[^/]+/posts/")
+POST_LINK_RE = re.compile(r"/(posts|permalink)/\d+|story_fbid=|/groups/[^/]+/posts/|set=pcb\.\d+")
 
 
 def _sanitize_cookie(c: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,60 +99,114 @@ def get_persisted_cookies() -> List[Dict[str, Any]]:
     return []
 
 
-def _clean_url(href: str) -> str:
-    """Làm sạch URL bài viết Facebook, bỏ các tham số tracking."""
-    full = urljoin("https://www.facebook.com", href)
-    return full.split("?")[0] if "story_fbid" not in full else full
+def _extract_group_slug(group_url: str) -> str:
+    """Trích xuất slug hoặc id của group từ URL."""
+    m = re.search(r'/groups/([^/?#]+)', group_url)
+    return m.group(1) if m else "group"
 
 
-def _extract_posts(page, limit: int, max_scrolls: int = 4) -> List[Dict[str, Any]]:
+def _extract_post_url(item, group_slug: str) -> Optional[str]:
+    """Tìm đường dẫn chuẩn của bài viết trong thẻ feed."""
+    try:
+        for a in item.locator("a[href]").all():
+            href = a.get_attribute("href") or ""
+            # Dạng set=pcb.123456789
+            m_pcb = re.search(r'set=pcb\.(\d+)', href)
+            if m_pcb:
+                return f"https://www.facebook.com/groups/{group_slug}/posts/{m_pcb.group(1)}/"
+
+            # Dạng /posts/123456789 hoặc /permalink/123456789
+            m_post = re.search(r'/(?:posts|permalink)/(\d+)', href)
+            if m_post:
+                return f"https://www.facebook.com/groups/{group_slug}/posts/{m_post.group(1)}/"
+
+            # Dạng story_fbid=123456789
+            m_story = re.search(r'story_fbid=(\d+)', href)
+            if m_story:
+                return f"https://www.facebook.com/groups/{group_slug}/posts/{m_story.group(1)}/"
+    except Exception:
+        pass
+    return None
+
+
+def _extract_post_text(item) -> str:
+    """Lấy nội dung văn bản bài viết, ưu tiên vùng nội dung chính."""
+    # 1. Thử qua data-ad-preview message
+    try:
+        msg = item.locator("div[data-ad-preview='message'], div[data-ad-comet-preview='message']").first
+        if msg.count() > 0:
+            txt = msg.inner_text().strip()
+            if len(txt) > 10:
+                return txt
+    except Exception:
+        pass
+
+    # 2. Thử các khối dir='auto'
+    try:
+        divs = item.locator("div[dir='auto']").all()
+        texts = []
+        for d in divs:
+            try:
+                t = d.inner_text().strip()
+                if len(t) > 20 and not any(w in t for w in ["Bình luận", "Chia sẻ", "Thích", "Xem thêm"]):
+                    texts.append(t)
+            except Exception:
+                continue
+        if texts:
+            # Lấy đoạn dài nhất
+            texts.sort(key=len, reverse=True)
+            return texts[0]
+    except Exception:
+        pass
+
+    # 3. Fallback lấy toàn bộ text thẻ
+    try:
+        raw = item.inner_text().strip()
+        lines = [line.strip() for line in raw.split("\n") if len(line.strip()) > 15]
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _extract_posts(page, group_url: str, limit: int, max_scrolls: int = 4) -> List[Dict[str, Any]]:
     """Cuộn trang 3-5 lần, bấm 'Xem thêm', trích xuất bài đăng và lọc trùng link."""
     posts: Dict[str, Dict[str, Any]] = {}
+    group_slug = _extract_group_slug(group_url)
 
-    for scroll_idx in range(max_scrolls):
+    for _ in range(max_scrolls):
         # Bấm các nút "Xem thêm" / "See more" để bung nội dung ẩn
         try:
             buttons = page.get_by_role("button", name=re.compile(r"Xem thêm|See more|Xem thêm bài viết", re.I)).all()
-            for btn in buttons[:5]:
+            for btn in buttons[:6]:
                 try:
-                    btn.click(timeout=600)
+                    btn.click(timeout=500)
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # Quét các thẻ bài viết (role='article')
+        # Quét các thẻ bài viết (div[role='feed'] > div hoặc role='article')
         try:
-            articles = page.locator("div[role='article']").all()
+            items = page.locator("div[role='feed'] > div, div[role='article']").all()
         except Exception:
-            articles = []
+            items = []
 
-        for article in articles:
+        for item in items:
             try:
-                # Tìm đường dẫn bài viết
-                link = next(
-                    (
-                        a.get_attribute("href")
-                        for a in article.locator("a[href]").all()
-                        if POST_LINK_RE.search(a.get_attribute("href") or "")
-                    ),
-                    None,
-                )
-                if not link:
+                post_url = _extract_post_url(item, group_slug)
+                if not post_url or post_url in posts:
                     continue
 
-                url = _clean_url(link)
-                if url in posts:
+                text = _extract_post_text(item)
+                if not text or len(text) < 20:
                     continue
 
-                text = article.inner_text(timeout=1500).strip()
-                if not text:
-                    continue
+                title = text.split("\n")[0][:50].strip() or text[:50].strip()
 
-                posts[url] = {
-                    "title": text[:50].replace("\n", " ").strip(),
+                posts[post_url] = {
+                    "title": title,
                     "raw_content": text,
-                    "url": url,
+                    "url": post_url,
                     "source": "Facebook",
                     "posted_time": datetime.now().isoformat(),
                 }
@@ -163,7 +217,7 @@ def _extract_posts(page, limit: int, max_scrolls: int = 4) -> List[Dict[str, Any
             break
 
         # Cuộn trang xuống
-        page.mouse.wheel(0, 3500)
+        page.mouse.wheel(0, 3000)
         page.wait_for_timeout(2000)
 
     return list(posts.values())[:limit]
@@ -194,7 +248,7 @@ def crawl_fb_groups(
 
     try:
         with sync_playwright() as p:
-            # Ưu tiên mở persistent context nếu có profile
+            ctx = None
             try:
                 ctx = p.chromium.launch_persistent_context(
                     str(PROFILE_DIR),
@@ -203,16 +257,32 @@ def crawl_fb_groups(
                     args=["--disable-notifications", "--disable-geolocation"],
                 )
             except Exception as e:
-                log.warning("Không thể mở persistent_context, fallback sang browser thông thường: %s", e)
-                try:
-                    browser = p.chromium.launch(
-                        headless=headless,
-                        args=["--disable-notifications", "--disable-geolocation"],
-                    )
-                    ctx = browser.new_context(locale="vi-VN")
-                except Exception as ex:
-                    log.warning("Chromium không khả dụng trên môi trường hiện tại: %s", ex)
-                    return []
+                err_msg = str(e).lower()
+                if "executable" in err_msg or "install" in err_msg:
+                    log.info("Chưa có browser binary trên Cloud, đang tự động chạy 'playwright install chromium'...")
+                    try:
+                        import subprocess
+                        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True, timeout=120)
+                        ctx = p.chromium.launch_persistent_context(
+                            str(PROFILE_DIR),
+                            headless=headless,
+                            locale="vi-VN",
+                            args=["--disable-notifications", "--disable-geolocation"],
+                        )
+                    except Exception as err:
+                        log.warning("Không thể tự động cài Playwright Chromium: %s", err)
+
+                if ctx is None:
+                    log.warning("Không thể mở persistent_context, fallback sang browser thông thường: %s", e)
+                    try:
+                        browser = p.chromium.launch(
+                            headless=headless,
+                            args=["--disable-notifications", "--disable-geolocation"],
+                        )
+                        ctx = browser.new_context(locale="vi-VN")
+                    except Exception as ex:
+                        log.warning("Chromium không khả dụng trên môi trường hiện tại: %s", ex)
+                        return []
 
             # Nạp cookie nếu có
             if cookies:
@@ -238,7 +308,7 @@ def crawl_fb_groups(
                         )
                         continue
 
-                    items = _extract_posts(page, limit=results_limit, max_scrolls=4)
+                    items = _extract_posts(page, group_url=url, limit=results_limit, max_scrolls=4)
                     log.info("  → Thu thập được %d bài viết từ %s", len(items), url)
                     results.extend(items)
                 except Exception as e:
