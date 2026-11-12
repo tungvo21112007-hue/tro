@@ -1,13 +1,14 @@
 """
-ai_filter.py – Phân tích & chuẩn hóa tin cho thuê Đà Nẵng bằng Gemini 2.5 Flash.
-Trả về structured output qua Pydantic response_schema.
+ai_filter.py – Phân tích & chuẩn hóa tin cho thuê Đà Nẵng
+qua OpenRouter API (tương thích OpenAI SDK) + Pydantic structured output.
 """
 
+import json
 import logging
 import os
 from typing import Any, Dict, Optional
 
-from google import genai
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 logging.basicConfig(
@@ -24,6 +25,8 @@ DANANG_DISTRICTS = [
     "Cẩm Lệ",
     "Hòa Vang",
 ]
+
+DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 
 # ── Pydantic schema cho structured output ────────────────────────────
@@ -48,7 +51,7 @@ class RentalAnalysis(BaseModel):
         description=(
             "Giá thuê HÀNG THÁNG quy đổi ra đơn vị VNĐ (số nguyên). "
             "Ví dụ: '2tr5' → 2500000, '3.5 triệu' → 3500000, '800k' → 800000. "
-            "None nếu không xác định được giá hoặc giá ghi là 'thỏa thuận'."
+            "null nếu không xác định được giá hoặc giá ghi là 'thỏa thuận'."
         ),
     )
     district: Optional[str] = Field(
@@ -56,7 +59,7 @@ class RentalAnalysis(BaseModel):
         description=(
             "Tên quận/huyện tại Đà Nẵng, chuẩn hóa chính xác về một trong: "
             + ", ".join(DANANG_DISTRICTS)
-            + ". None nếu không xác định được khu vực."
+            + ". null nếu không xác định được khu vực."
         ),
     )
     room_type: Optional[str] = Field(
@@ -64,7 +67,7 @@ class RentalAnalysis(BaseModel):
         description=(
             "Loại hình cho thuê, chỉ trả về một trong ba giá trị: "
             "'Phòng trọ', 'Căn hộ/CCMN', hoặc 'Nhà nguyên căn'. "
-            "None nếu không xác định được."
+            "null nếu không xác định được."
         ),
     )
 
@@ -91,49 +94,82 @@ Chuẩn hóa quận Đà Nẵng:
 - "sơn tra", "Son Tra", "ST" → "Sơn Trà"
 - "ngu hanh son", "NHS" → "Ngũ Hành Sơn"
 - Nếu chỉ ghi tên đường, hãy suy luận quận dựa trên kiến thức địa lý Đà Nẵng.
+
+BẮT BUỘC trả về đúng JSON schema với các trường:
+is_valid_rental (bool), is_spam (bool), price_vnd (int|null), district (str|null), room_type (str|null).
 """
 
+# ── JSON schema cho response_format ──────────────────────────────────
+RENTAL_JSON_SCHEMA = {
+    "name": "rental_analysis",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "is_valid_rental": {"type": "boolean"},
+            "is_spam": {"type": "boolean"},
+            "price_vnd": {"type": ["integer", "null"]},
+            "district": {"type": ["string", "null"]},
+            "room_type": {"type": ["string", "null"]},
+        },
+        "required": ["is_valid_rental", "is_spam", "price_vnd", "district", "room_type"],
+        "additionalProperties": False,
+    },
+}
 
-def _get_client() -> genai.Client:
-    api_key = os.getenv("GEMINI_API_KEY")
+
+def _get_client() -> OpenAI:
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "Thiếu biến môi trường GEMINI_API_KEY. "
-            "Tạo key tại https://aistudio.google.com/apikey"
+            "Thiếu biến môi trường OPENROUTER_API_KEY. "
+            "Tạo key tại https://openrouter.ai/keys"
         )
-    return genai.Client(api_key=api_key)
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
+
+
+def _get_model() -> str:
+    return os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
 
 
 def analyze_rental(title: str, raw_content: str) -> Dict[str, Any]:
     """
-    Gửi nội dung tin đăng tới Gemini 2.5 Flash, nhận về kết quả
-    phân loại và chuẩn hóa dưới dạng dict.
+    Gửi nội dung tin đăng tới OpenRouter (Gemini 2.5 Flash), nhận về
+    kết quả phân loại và chuẩn hóa dưới dạng dict.
 
     Returns:
         Dict với các key: is_valid_rental, is_spam, price_vnd, district, room_type
     """
     client = _get_client()
-
+    model = _get_model()
     user_prompt = f"Tiêu đề: {title}\nNội dung: {raw_content}"
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_prompt,
-            config={
-                "system_instruction": SYSTEM_PROMPT,
-                "response_mime_type": "application/json",
-                "response_schema": RentalAnalysis,
-                "temperature": 0.1,
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": RENTAL_JSON_SCHEMA,
             },
         )
 
-        if response.text:
-            result = RentalAnalysis.model_validate_json(response.text)
+        content = response.choices[0].message.content
+        if content:
+            parsed = json.loads(content)
+            # Validate qua Pydantic để đảm bảo đúng kiểu
+            result = RentalAnalysis.model_validate(parsed)
             return result.model_dump()
 
     except Exception as e:
-        logging.warning("Lỗi khi gọi Gemini API cho tin '%s': %s", title[:40], e)
+        logging.warning("Lỗi khi gọi OpenRouter API cho tin '%s': %s", title[:40], e)
 
     # Fallback an toàn — không chặn pipeline
     return {
@@ -152,7 +188,7 @@ def analyze_batch(
 ) -> list[Dict[str, Any]]:
     """
     Phân tích hàng loạt bài đăng. Trả về danh sách dict gốc đã được
-    merge thêm các trường từ Gemini (is_valid_rental, is_spam, price_vnd,
+    merge thêm các trường từ AI (is_valid_rental, is_spam, price_vnd,
     district, room_type).
     """
     results = []
@@ -196,9 +232,9 @@ if __name__ == "__main__":
         },
     ]
 
-    print("=== Test ai_filter.py ===\n")
+    print("=== Test ai_filter.py (OpenRouter) ===\n")
     for s in samples:
         print(f"Input: {s['title']}")
         # result = analyze_rental(s["title"], s["raw_content"])
         # print(f"Output: {result}\n")
-    print("(Bỏ comment dòng trên và đặt GEMINI_API_KEY để chạy thật)")
+    print("(Bỏ comment dòng trên và đặt OPENROUTER_API_KEY để chạy thật)")
