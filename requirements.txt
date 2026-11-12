@@ -1,0 +1,7 @@
+apify-client
+crawlee[beautifulsoup]
+google-genai
+pydantic
+streamlit
+pandas
+apscheduler
