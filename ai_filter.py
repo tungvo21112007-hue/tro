@@ -1,21 +1,55 @@
 """
-ai_filter.py – Phân tích & chuẩn hóa tin cho thuê Đà Nẵng
-qua OpenRouter API (tương thích OpenAI SDK) + Pydantic structured output.
+ai_filter.py – Bộ lọc & bóc tách dữ liệu tin phòng trọ Đà Nẵng 100% Python thuần.
+Sử dụng Regex và Rule-based heuristic: 0 tốn token, tốc độ xử lý tức thì.
 """
 
-import json
 import logging
-import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
-from openai import APIStatusError, OpenAI
-from pydantic import BaseModel, Field
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("ai_filter")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# ── 1. Danh sách từ khóa lọc rác & tin tìm trọ ────────────────────────
+JUNK_KEYWORDS = [
+    "cần tìm",
+    "tìm phòng",
+    "tìm trọ",
+    "pass lại",
+    "thanh lý",
+    "tuyển dụng",
+    "việc làm",
+    "vay vốn",
+    "sim số",
+    "bán đất",
+    "sang quán",
+    "sang mặt bằng",
+    "sang lô",
+    "sang shop",
+    "sang nhượng",
+    "áo quần",
+    "quần áo",
+]
 
+# Từ khóa xác nhận là tin cho thuê phòng/căn hộ
+RENTAL_KEYWORDS = [
+    "cho thuê",
+    "phòng trọ",
+    "căn hộ",
+    "studio",
+    "chung cư mini",
+    "nhà nguyên căn",
+    "ở ghép",
+    "còn trống",
+    "nhà trọ",
+    "phòng trống",
+    "cho thue",
+    "phong tro",
+    "can ho",
+    "ccmn",
+]
+
+# ── 2. Từ điển ánh xạ quận, phường, đường tại Đà Nẵng ─────────────────
 DANANG_DISTRICTS = [
     "Hải Châu",
     "Thanh Khê",
@@ -26,232 +60,229 @@ DANANG_DISTRICTS = [
     "Hòa Vang",
 ]
 
-DEFAULT_MODEL = "google/gemini-2.5-flash"
-
-
-class QuotaExceededError(Exception):
-    """Ngoại lệ khi OpenRouter API hết credit (402), sai API key (401), hoặc bị rate limit (429)."""
-    pass
-
-
-# ── Pydantic schema cho structured output ────────────────────────────
-class RentalAnalysis(BaseModel):
-    is_valid_rental: bool = Field(
-        description=(
-            "True nếu bài viết là tin CHO THUÊ phòng trọ / căn hộ / nhà thực sự "
-            "(có giá, có địa chỉ, người đăng là chủ nhà hoặc môi giới). "
-            "False nếu là tin TÌM PHÒNG, pass đồ, quảng cáo dịch vụ, tuyển dụng, "
-            "bán hàng, hoặc nội dung không liên quan cho thuê."
-        ),
-    )
-    is_spam: bool = Field(
-        description=(
-            "True nếu giá ảo (1đ, 1k, 0đ, 999đ), bài copy-paste câu tương tác, "
-            "bài chỉ có ảnh không nội dung, hoặc tin lừa đảo rõ ràng. "
-            "False nếu bài viết có thông tin cho thuê hợp lý."
-        ),
-    )
-    price_vnd: Optional[int] = Field(
-        None,
-        description=(
-            "Giá thuê HÀNG THÁNG quy đổi ra đơn vị VNĐ (số nguyên). "
-            "Ví dụ: '2tr5' → 2500000, '3.5 triệu' → 3500000, '800k' → 800000. "
-            "null nếu không xác định được giá hoặc giá ghi là 'thỏa thuận'."
-        ),
-    )
-    district: Optional[str] = Field(
-        None,
-        description=(
-            "Tên quận/huyện tại Đà Nẵng, chuẩn hóa chính xác về một trong: "
-            + ", ".join(DANANG_DISTRICTS)
-            + ". null nếu không xác định được khu vực."
-        ),
-    )
-    room_type: Optional[str] = Field(
-        None,
-        description=(
-            "Loại hình cho thuê, chỉ trả về một trong ba giá trị: "
-            "'Phòng trọ', 'Căn hộ/CCMN', hoặc 'Nhà nguyên căn'. "
-            "null nếu không xác định được."
-        ),
-    )
-
-
-# ── System prompt ────────────────────────────────────────────────────
-SYSTEM_PROMPT = """Bạn là hệ thống AI chuyên phân loại và chuẩn hóa tin cho thuê nhà/phòng trọ
-tại thành phố Đà Nẵng, Việt Nam.
-
-Quy tắc quy đổi giá:
-- "triệu", "tr" = ×1.000.000  (ví dụ "2tr5" = 2.500.000)
-- "k" = ×1.000  (ví dụ "800k" = 800.000)
-- "đ" = ×1  (ví dụ "2500000đ" = 2.500.000)
-- Giá 1đ, 0đ, 1k, 999đ → spam (giá ảo).
-- Giá "thỏa thuận" hoặc "liên hệ" → price_vnd = null.
-
-Quy tắc phân loại:
-- Tin CHO THUÊ hợp lệ: có mô tả phòng/nhà, có giá hoặc liên hệ, có khu vực.
-- Tin TÌM PHÒNG (người thuê đăng tìm) → is_valid_rental = false.
-- Tin pass đồ, bán hàng, quảng cáo dọn nhà → is_valid_rental = false.
-- Bài chỉ có ảnh, nội dung rỗng hoặc copy-paste câu like → is_spam = true.
-
-Chuẩn hóa quận Đà Nẵng:
-- "HảI châu", "hai chau", "HC" → "Hải Châu"
-- "sơn tra", "Son Tra", "ST" → "Sơn Trà"
-- "ngu hanh son", "NHS" → "Ngũ Hành Sơn"
-- Nếu chỉ ghi tên đường, hãy suy luận quận dựa trên kiến thức địa lý Đà Nẵng.
-
-BẮT BUỘC trả về đúng JSON schema với các trường:
-is_valid_rental (bool), is_spam (bool), price_vnd (int|null), district (str|null), room_type (str|null).
-"""
-
-# ── JSON schema cho response_format ──────────────────────────────────
-RENTAL_JSON_SCHEMA = {
-    "name": "rental_analysis",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "is_valid_rental": {"type": "boolean"},
-            "is_spam": {"type": "boolean"},
-            "price_vnd": {"type": ["integer", "null"]},
-            "district": {"type": ["string", "null"]},
-            "room_type": {"type": ["string", "null"]},
-        },
-        "required": ["is_valid_rental", "is_spam", "price_vnd", "district", "room_type"],
-        "additionalProperties": False,
-    },
+DISTRICT_MAPPINGS = {
+    "Hải Châu": [
+        "hải châu", "hai chau", "bạch đằng", "phan châu trinh", "nguyễn văn linh",
+        "hùng vương", "trần phú", "lê duẩn", "hải châu 1", "hải châu 2",
+        "thạch thang", "thuận phước", "hòa thuận", "nam dương", "bình hiên",
+        "bình thuận", "hòa cường bắc", "hòa cường nam", "hòa cường", "đống đa",
+        "tiểu la", "hoàng diệu", "núi thành", "nguyễn tri phương", "quang trung",
+        "trưng nữ vương", "chợ hàn", "chợ cồn",
+    ],
+    "Thanh Khê": [
+        "thanh khê", "thanh khe", "điện biên phủ", "hà huy tập", "nguyễn tất thành",
+        "dũng sĩ thanh khê", "tam thuận", "thanh khê tây", "thanh khê đông",
+        "xuân hà", "tân chính", "chính gián", "vĩnh trung", "thạc gián",
+        "an khê", "hòa khê", "trần cao vân", "thái thị bôi", "lý thái tổ",
+    ],
+    "Sơn Trà": [
+        "sơn trà", "son tra", "võ nguyên giáp", "phạm văn đồng", "hồ nghinh",
+        "an hải bắc", "an hải đông", "an hải tây", "an hải", "phước mỹ",
+        "mân thái", "thọ quang", "nại hiên đông", "mỹ khê", "cầu rồng",
+        "cầu sông hàn", "hoàng sa", "võ văn kiệt", "ngô quyền",
+    ],
+    "Ngũ Hành Sơn": [
+        "ngũ hành sơn", "ngu hanh son", "ngũ hành", "lê văn hiến", "trần đại nghĩa",
+        "khuê mỹ", "mỹ an", "hòa quý", "hòa hải", "châu thị vĩnh tế",
+        "phan tứ", "fpt", "vku", "non nước", "bà huyện thanh quan",
+    ],
+    "Liên Chiểu": [
+        "liên chiểu", "lien chieu", "tôn đức thắng", "nguyễn lương bằng",
+        "bách khoa", "sư phạm", "hòa khánh bắc", "hòa khánh nam", "hòa khánh",
+        "hòa minh", "hòa hiệp bắc", "hòa hiệp nam", "hòa hiệp", "âu cơ",
+        "nam ô", "kinh tế",
+    ],
+    "Cẩm Lệ": [
+        "cẩm lệ", "cam le", "cách mạng tháng 8", "cmt8", "ông ích đường",
+        "khuê trung", "hòa thọ đông", "hòa thọ tây", "hòa thọ", "hòa xuân",
+        "hòa phát", "hòa an", "lê đại hành", "nguyễn hữu thọ",
+    ],
+    "Hòa Vang": [
+        "hòa vang", "hoa vang", "hòa tiến", "hòa châu", "hòa phong",
+        "hòa nhơn", "hòa liên", "hòa sơn", "hòa ninh", "hòa bắc", "hòa phú",
+        "quốc lộ 14b",
+    ],
 }
 
 
-def _get_client() -> OpenAI:
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Thiếu biến môi trường OPENROUTER_API_KEY. "
-            "Tạo key tại https://openrouter.ai/keys"
-        )
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+def extract_district(text: str) -> str:
+    """Xác định quận tại Đà Nẵng từ tiêu đề, nội dung và địa chỉ."""
+    if not text:
+        return "Khác"
+    t = text.lower()
+    for district, keywords in DISTRICT_MAPPINGS.items():
+        for kw in keywords:
+            # Tìm từ khóa đứng độc lập hoặc trong cụm từ
+            if kw in t:
+                return district
+    return "Khác"
 
 
-def _get_model() -> str:
-    return os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
+def extract_price_vnd(text: str) -> Optional[int]:
+    """Bóc tách giá thuê phòng quy đổi về số nguyên VND bằng Regex."""
+    if not text:
+        return None
+    t = text.lower().strip()
+
+    # 1. Dạng "X củ rưỡi", "X triệu rưỡi", "Xtr rưỡi"
+    m = re.search(r'(\d+)\s*(?:triệu|trieu|tr|củ|cu)\s*rưỡi', t)
+    if m:
+        return int((float(m.group(1)) + 0.5) * 1_000_000)
+
+    # 2. Dạng "XtrY" ví dụ 2tr5, 1tr8, 3tr2, 2tr500
+    m = re.search(r'(\d+)\s*tr\s*(\d+)', t)
+    if m:
+        trieu = int(m.group(1))
+        le_str = m.group(2)
+        if len(le_str) == 1:
+            le = int(le_str) * 100_000
+        elif len(le_str) == 2:
+            le = int(le_str) * 10_000
+        else:
+            le = int(le_str[:3].ljust(6, '0'))
+        return trieu * 1_000_000 + le
+
+    # 3. Dạng "X.Y triệu", "X,Y triệu", "X triệu", "X.Y tr", "X củ"
+    m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:triệu|trieu|tr|củ|cu)\b', t)
+    if m:
+        val = float(m.group(1).replace(',', '.'))
+        return int(val * 1_000_000)
+
+    # 4. Dạng "2500k", "800k"
+    m = re.search(r'(\d+)\s*k\b', t)
+    if m:
+        return int(m.group(1)) * 1_000
+
+    # 5. Dạng số đầy đủ: "3.500.000", "950,000", "950.000 đ"
+    m = re.search(r'(\d{1,3}(?:[.,]\d{3}){1,2})', t)
+    if m:
+        num_str = re.sub(r'[.,]', '', m.group(1))
+        return int(num_str)
+
+    # 6. Số liền 6-8 chữ số
+    m = re.search(r'\b(\d{6,8})\b', t)
+    if m:
+        return int(m.group(1))
+
+    return None
 
 
-def analyze_rental(title: str, raw_content: str) -> Dict[str, Any]:
+def extract_room_type(text: str) -> str:
+    """Phân loại loại phòng theo từ khóa."""
+    t = (text or "").lower()
+    if any(k in t for k in ["studio", "căn hộ", "chung cư", "ccmn", "duplex", "penthouse", "condo", "apartment"]):
+        return "Chung cư mini / Căn hộ"
+    if any(k in t for k in ["nguyên căn", "nhà riêng", "nhà mặt tiền", "nhà phố", "nhà kiệt"]):
+        return "Nhà nguyên căn"
+    if any(k in t for k in ["ở ghép", "tìm bạn ở ghép", "tìm người ở ghép", "share phòng", "homestay"]):
+        return "Ở ghép"
+    return "Phòng trọ"
+
+
+def filter_and_extract(
+    title: str,
+    raw_content: str,
+    existing_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
-    Gửi nội dung tin đăng tới OpenRouter, nhận về kết quả phân loại và chuẩn hóa.
-    Nếu gặp lỗi hạn mức/credit (402), sai key (401), hoặc rate limit (429), raise QuotaExceededError.
+    Hàm phân tích, chuẩn hóa và lọc tin rác 100% bằng Python & Regex.
+    Không tốn token API, trả kết quả tức thì.
 
     Returns:
-        Dict với các key: is_valid_rental, is_spam, price_vnd, district, room_type
+        {
+            "is_valid_rental": bool,
+            "is_spam": bool,
+            "price_vnd": Optional[int],
+            "district": str,
+            "room_type": str,
+        }
     """
-    client = _get_client()
-    model = _get_model()
-    user_prompt = f"Tiêu đề: {title}\nNội dung: {raw_content}"
+    existing_data = existing_data or {}
+    full_text = f"{title} {raw_content}".lower()
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            max_tokens=1024,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": RENTAL_JSON_SCHEMA,
-            },
-        )
+    # 1. Kiểm tra từ khóa rác / tìm trọ
+    for junk in JUNK_KEYWORDS:
+        if junk in full_text:
+            return {
+                "is_valid_rental": False,
+                "is_spam": False,
+                "price_vnd": None,
+                "district": "Khác",
+                "room_type": "Phòng trọ",
+            }
 
-        content = response.choices[0].message.content
-        if content:
-            parsed = json.loads(content)
-            # Validate qua Pydantic để đảm bảo đúng kiểu
-            result = RentalAnalysis.model_validate(parsed)
-            return result.model_dump()
+    # 2. Kiểm tra có phải tin cho thuê phòng không
+    source = existing_data.get("source", "").lower()
+    is_from_rental_site = source in ["phongtro123", "chotot"]
+    has_rental_keyword = any(k in full_text for k in RENTAL_KEYWORDS)
 
-    except APIStatusError as e:
-        if e.status_code in (401, 402, 429):
-            msg = f"OpenRouter API gặp lỗi HTTP {e.status_code} ({e.message})"
-            logging.error(msg)
-            raise QuotaExceededError(msg) from e
-        logging.warning("Lỗi APIStatusError khi gọi OpenRouter cho tin '%s': %s", title[:40], e)
-    except Exception as e:
-        status_code = getattr(e, "status_code", None)
-        if status_code in (401, 402, 429):
-            msg = f"OpenRouter API gặp lỗi HTTP {status_code}: {e}"
-            logging.error(msg)
-            raise QuotaExceededError(msg) from e
-        logging.warning("Lỗi khi gọi OpenRouter API cho tin '%s': %s", title[:40], e)
+    if not is_from_rental_site and not has_rental_keyword:
+        return {
+            "is_valid_rental": False,
+            "is_spam": False,
+            "price_vnd": None,
+            "district": "Khác",
+            "room_type": "Phòng trọ",
+        }
 
-    # Fallback an toàn cho các lỗi mạng thông thường không phải do hết hạn mức
+    # 3. Lấy hoặc bóc tách giá tiền
+    price_vnd = existing_data.get("price_vnd")
+    if price_vnd is None:
+        price_vnd = extract_price_vnd(full_text)
+
+    # 4. Kiểm tra giá ảo / spam
+    is_spam = False
+    if price_vnd is not None:
+        # Giá < 500,000 VND (1k, 0đ, 1000đ) hoặc > 50 triệu (bán đất/nhà) -> coi là spam
+        if price_vnd < 500_000 or price_vnd > 50_000_000:
+            is_spam = True
+
+    # 5. Lấy hoặc bóc tách quận/huyện
+    district = existing_data.get("district")
+    if not district or district == "Khác":
+        district = extract_district(f"{title} {raw_content}")
+
+    # 6. Phân loại phòng
+    room_type = existing_data.get("room_type") or extract_room_type(full_text)
+
     return {
-        "is_valid_rental": False,
-        "is_spam": False,
-        "price_vnd": None,
-        "district": None,
-        "room_type": None,
+        "is_valid_rental": True,
+        "is_spam": is_spam,
+        "price_vnd": price_vnd,
+        "district": district or "Khác",
+        "room_type": room_type,
     }
 
 
+# Alias giữ nguyên để tương thích ngược với các hàm gọi cũ
+analyze_rental = filter_and_extract
+
+
 def analyze_batch(
-    items: list[Dict[str, Any]],
+    items: List[Dict[str, Any]],
     title_key: str = "title",
     content_key: str = "raw_content",
-) -> list[Dict[str, Any]]:
-    """
-    Phân tích hàng loạt bài đăng. Trả về danh sách dict gốc đã được
-    merge thêm các trường từ AI (is_valid_rental, is_spam, price_vnd,
-    district, room_type).
-    """
+) -> List[Dict[str, Any]]:
+    """Phân tích hàng loạt tin bằng regex & rule-based."""
     results = []
-    total = len(items)
-
-    for i, item in enumerate(items, 1):
+    for item in items:
         title = item.get(title_key, "")
         content = item.get(content_key, "")
-
-        logging.info("[%d/%d] Phân tích: %s", i, total, title[:50])
-        analysis = analyze_rental(title, content)
-
-        merged = {**item, **analysis}
-        results.append(merged)
-
-    valid = sum(1 for r in results if r.get("is_valid_rental") and not r.get("is_spam"))
-    logging.info(
-        "Phân tích xong %d bài: %d hợp lệ, %d loại bỏ.",
-        total, valid, total - valid,
-    )
+        analysis = filter_and_extract(title, content, existing_data=item)
+        results.append({**item, **analysis})
     return results
 
 
 if __name__ == "__main__":
-    samples = [
-        {
-            "title": "Cho thuê phòng trọ kiệt Phan Châu Trinh",
-            "raw_content": (
-                "Phòng 25m2 full nội thất, máy lạnh, nóng lạnh. "
-                "Giá 2tr5/tháng cọc 1 tháng. Gần chợ Hàn, quận Hải Châu. "
-                "LH 0901234567"
-            ),
-        },
-        {
-            "title": "Tìm phòng thuê gấp khu Sơn Trà",
-            "raw_content": "Em cần tìm phòng giá 2tr khu Sơn Trà, ai có phòng inbox em",
-        },
-        {
-            "title": "Pass bàn ghế thanh lý giá rẻ",
-            "raw_content": "Thanh lý bộ bàn ghế gỗ giá 500k, ai cần inbox nha",
-        },
+    test_cases = [
+        ("Cho thuê phòng trọ kiệt Phan Châu Trinh", "Phòng 25m2 full nội thất, giá 2tr5/tháng quận Hải Châu"),
+        ("Studio view biển Mỹ Khê", "Căn hộ studio 3.9 triệu/tháng Ngũ Hành Sơn đầy đủ tiện nghi"),
+        ("Tìm phòng thuê gấp", "Em cần tìm phòng giá 2tr khu vực Thanh Khê"),
+        ("Pass bàn ghế gỗ", "Thanh lý bàn ghế giá 500k ai mua inbox"),
+        ("Phòng trọ giá rẻ", "Phòng trọ giá 1k liên hệ gấp"),
+        ("Phòng trọ Hoà Khánh", "Gần Bách Khoa, giá 1tr2, vệ sinh khép kín"),
     ]
-
-    print("=== Test ai_filter.py (OpenRouter) ===\n")
-    for s in samples:
-        print(f"Input: {s['title']}")
-        # result = analyze_rental(s["title"], s["raw_content"])
-        # print(f"Output: {result}\n")
-    print("(Bỏ comment dòng trên và đặt OPENROUTER_API_KEY để chạy thật)")
+    print("=== TEST AI_FILTER (REGEX 0 TOKEN) ===")
+    for title, content in test_cases:
+        res = filter_and_extract(title, content)
+        print(f"'{title}': valid={res['is_valid_rental']}, spam={res['is_spam']}, price={res['price_vnd']}, district={res['district']}, type={res['room_type']}")

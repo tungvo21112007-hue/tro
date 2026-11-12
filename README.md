@@ -1,70 +1,63 @@
 # Đà Nẵng Rental Aggregator 🏠
 
-Tự động thu thập tin cho thuê phòng trọ Đà Nẵng từ Phongtro123, Chợ Tốt và Facebook Groups, lọc tin rác bằng AI (OpenRouter), lưu SQLite và xem qua dashboard Streamlit. Toàn bộ mã nguồn mở, không dùng dịch vụ cào trả phí.
+Hệ thống tự động thu thập tin cho thuê phòng trọ Đà Nẵng từ Phongtro123, Chợ Tốt và Facebook Groups, lọc tin rác và chuẩn hóa dữ liệu **100% bằng Python & Regex thuần (0 tốn token AI)**, lưu trữ SQLite và hiển thị qua dashboard Streamlit.
 
-## Kiến trúc
+## 🚀 Kiến trúc (100% Zero-Token)
 
 ```
 web_crawler.py  (Phongtro123: requests+BS4 | Chợ Tốt: API JSON) ─┐
 fb_crawler.py   (Facebook Groups: Playwright)                    ─┴► pipeline.py
-      url_exists()? ─ đã có ─► bỏ qua (không tốn token)
+      url_exists()? ─ đã có ─► bỏ qua (không quét lại)
             │ chưa có
             ▼
-      ai_filter.py (OpenRouter, Pydantic schema)
+      ai_filter.py (Regex & Rule-based Heuristic 100% Python)
             │ is_valid_rental == True và is_spam == False
             ▼
-      database.py (SQLite rentals.db) ◄── app.py (Streamlit)
-      APScheduler: chạy lại mỗi 30 phút
+      database.py (SQLite rentals.db) ◄── app.py (Streamlit Dashboard)
+      APScheduler: chạy tự động định kỳ mỗi 30 phút
 ```
 
 | File | Vai trò |
 |---|---|
-| `web_crawler.py` | `crawl_phongtro123()` đọc HTML `phongtro123.com/tinh-thanh/da-nang`; `crawl_chotot()` gọi `gateway.chotot.com/v1/public/ad-listing` (danh mục phòng trọ, Đà Nẵng). Thời gian đăng lấy chính xác từ trang/API. |
+| `web_crawler.py` | `crawl_phongtro123()` đọc HTML và bóc tách trực tiếp giá, quận; `crawl_chotot()` gọi `gateway.chotot.com/v1/public/ad-listing` lấy trực tiếp giá VND và tên quận từ JSON. |
 | `fb_crawler.py` | `crawl_fb_groups()` dùng Playwright mở group, cuộn trang, lấy nội dung + link bài. |
-| `ai_filter.py` | `analyze_rental()` gọi OpenRouter, trả `is_valid_rental`, `is_spam`, `price_vnd`, `district`, `room_type`. |
+| `ai_filter.py` | `filter_and_extract()` lọc rác, loại bỏ tin tìm phòng/pass đồ, chuẩn hóa quận và phân loại phòng bằng Regex thuần. |
 | `database.py` | Bảng `rentals`, `insert_rental()` (`INSERT OR IGNORE`), `url_exists()`, `get_rentals(filters)`. |
-| `pipeline.py` | ETL + APScheduler 30 phút/lần. |
-| `app.py` | Dashboard: lọc Quận, Giá, Thời gian, Nguồn, Từ khóa; nút "Quét tin mới ngay". |
+| `pipeline.py` | ETL điều phối crawler, lọc rác và lưu SQLite + APScheduler 30 phút/lần. |
+| `app.py` | Dashboard Streamlit: lọc Quận, Giá, Thời gian, Nguồn, Từ khóa; nút "Quét tin mới ngay" chạy trực tiếp không cần API key. |
 
-## Cài đặt
+## ⚙️ Cài đặt & Sử dụng
 
 ```bash
 git clone https://github.com/tungvo21112007-hue/tro.git && cd tro
 pip install -r requirements.txt
 playwright install chromium
-
-cp .env.example .env        # điền OPENROUTER_API_KEY (https://openrouter.ai/keys)
-set -a; source .env; set +a # nạp biến môi trường vào shell hiện tại
 ```
 
-Biến môi trường:
+> [!NOTE]
+> Dự án hoạt động **hoàn toàn độc lập không cần bất kỳ API Key nào**! Bạn có thể chạy ngay lập tức cả trên máy local lẫn Streamlit Cloud.
 
-| Biến | Ý nghĩa |
-|---|---|
-| `OPENROUTER_API_KEY` | Bắt buộc. |
-| `OPENROUTER_MODEL` | Mặc định `google/gemini-2.5-flash`. |
-| `FB_GROUP_URLS` | Tùy chọn, URL các Facebook Group, ngăn cách bằng dấu phẩy. |
+## 🔄 Chạy ứng dụng
 
-## Facebook (đọc kỹ)
+- **Chạy pipeline thu thập & lọc rác ngay 1 lần**:
+  ```bash
+  python pipeline.py --once
+  ```
 
-Facebook thường chặn người chưa đăng nhập, kể cả với group công khai. Đăng nhập một lần, session lưu ở `fb_profile/` (đã `.gitignore`):
+- **Chạy pipeline với lịch định kỳ mỗi 30 phút**:
+  ```bash
+  python pipeline.py
+  ```
 
+- **Mở giao diện Web Dashboard**:
+  ```bash
+  streamlit run app.py
+  ```
+
+## 👥 Facebook Crawler (Tùy chọn)
+
+Facebook thường yêu cầu đăng nhập đối với một số nhóm. Bạn có thể đăng nhập 1 lần để lưu session ở thư mục `fb_profile/`:
 ```bash
 python fb_crawler.py --login   # đăng nhập tay rồi nhấn Enter
-python fb_crawler.py --show    # chạy thử có hiện trình duyệt
 ```
-
-Chưa đăng nhập thì crawler cảnh báo và bỏ qua group; Phongtro123 và Chợ Tốt vẫn chạy bình thường. Dùng tài khoản phụ, vì tự động hóa có thể vi phạm điều khoản Facebook. Thời gian đăng của bài Facebook hiện là giờ lúc cào.
-
-## Chạy
-
-```bash
-python web_crawler.py     # thử riêng crawler web (không cần API key)
-python pipeline.py        # chạy ngay 1 lần, sau đó lặp mỗi 30 phút
-streamlit run app.py      # mở dashboard
-```
-
-## Lưu ý
-
-- Selector Phongtro123 và tham số Chợ Tốt (`cg=1050`, `region_v2=3017`) có thể đổi theo thời gian; `python web_crawler.py` giúp kiểm tra nhanh.
-- Tin có `price_vnd` rỗng ("thỏa thuận") sẽ bị loại khi lọc theo khoảng giá trong dashboard.
+Nếu chưa đăng nhập hoặc trên môi trường Cloud không có browser, crawler Facebook sẽ tự động bỏ qua an toàn mà không làm ảnh hưởng đến nguồn Phongtro123 và Chợ Tốt.

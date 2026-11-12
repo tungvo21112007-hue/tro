@@ -1,10 +1,10 @@
 """
-pipeline.py – Điều phối toàn bộ chu trình:
-  1. Thu thập dữ liệu từ fb_crawler + web_crawler
-  2. Lọc URL trùng với database (tiết kiệm token OpenRouter)
-  3. Phân tích qua ai_filter (OpenRouter)
+pipeline.py – Điều phối toàn bộ chu trình ETL:
+  1. Thu thập dữ liệu từ fb_crawler + web_crawler (Phongtro123 & Chợ Tốt)
+  2. Lọc URL trùng với SQLite
+  3. Lọc rác & chuẩn hóa giá, quận, loại phòng bằng Regex thuần (ai_filter.py) – 0 tốn token
   4. Lưu bài hợp lệ vào SQLite
-  5. Chạy tự động mỗi 30 phút bằng APScheduler
+  5. Chạy tự động mỗi 30 phút bằng APScheduler (hoặc chạy 1 lần qua cờ --once)
 """
 
 import logging
@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from ai_filter import QuotaExceededError, analyze_rental
+from ai_filter import filter_and_extract
 from database import init_db, insert_rental, url_exists
 from fb_crawler import crawl_fb_groups
 from web_crawler import crawl_chotot, crawl_phongtro123
@@ -28,7 +28,7 @@ log = logging.getLogger("pipeline")
 
 # ── Bước 1: Thu thập ─────────────────────────────────────────────────
 def _collect_all() -> List[Dict[str, Any]]:
-    """Gom dữ liệu thô từ tất cả nguồn crawler."""
+    """Gom dữ liệu từ tất cả các nguồn crawler."""
     all_items: List[Dict[str, Any]] = []
 
     # Facebook Groups
@@ -74,12 +74,10 @@ def _filter_new_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return new_items
 
 
-# ── Bước 3 + 4: Phân tích AI & lưu DB ────────────────────────────────
+# ── Bước 3 + 4: Phân tích Regex & lưu DB ─────────────────────────────
 def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
     """
-    Gửi từng bài qua OpenRouter để phân loại, chỉ lưu bài hợp lệ vào SQLite.
-    Nếu gặp QuotaExceededError (402, 401, 429), break dừng ngay chu trình và
-    không lưu URL của các bài bị lỗi vào database để xử lý lại lần sau.
+    Phân tích từng bài bằng regex/rule-based, chỉ lưu bài hợp lệ vào SQLite.
     Trả về thống kê {saved, spam, invalid, error}.
     """
     stats = {"saved": 0, "spam": 0, "invalid": 0, "error": 0}
@@ -89,35 +87,25 @@ def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
         title = item.get("title", "")
         raw_content = item.get("raw_content", "")
 
-        log.info("[%d/%d] Phân tích: %s", i, total, title[:50])
-
         try:
-            analysis = analyze_rental(title, raw_content)
-        except QuotaExceededError as e:
-            log.error(
-                "DỪNG CHU TRÌNH: OpenRouter hết credit hoặc lỗi API key (%s). "
-                "Bỏ qua %d tin còn lại để xử lý lại ở chu trình sau.",
-                e, total - i + 1,
-            )
-            stats["error"] += (total - i + 1)
-            break
+            analysis = filter_and_extract(title, raw_content, existing_data=item)
         except Exception as e:
-            log.warning("Lỗi không mong muốn khi gọi AI cho '%s': %s", title[:40], e)
+            log.warning("Lỗi phân tích cho '%s': %s", title[:40], e)
             stats["error"] += 1
             continue
 
-        # Chỉ lưu bài cho thuê hợp lệ, không phải spam
+        # Chỉ lưu bài cho thuê hợp lệ, không phải spam/tin tìm trọ
         if not analysis.get("is_valid_rental"):
-            log.info("  → Bỏ qua (không phải tin cho thuê)")
+            log.info("[%d/%d] Bỏ qua (không phải tin cho thuê): %s", i, total, title[:40])
             stats["invalid"] += 1
             continue
 
         if analysis.get("is_spam"):
-            log.info("  → Bỏ qua (spam / giá ảo)")
+            log.info("[%d/%d] Bỏ qua (spam / giá ảo): %s", i, total, title[:40])
             stats["spam"] += 1
             continue
 
-        # Merge dữ liệu crawler + AI analysis → payload lưu DB
+        # Merge dữ liệu crawler + phân tích → payload lưu DB
         record = {
             "title": title,
             "raw_content": raw_content,
@@ -131,20 +119,21 @@ def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
         }
 
         if insert_rental(record):
-            log.info("  → Đã lưu: %s | %s | %s",
-                     analysis.get("district"), analysis.get("room_type"),
-                     f"{analysis.get('price_vnd'):,}đ" if analysis.get("price_vnd") else "N/A")
+            price_display = f"{record['price_vnd']:,}đ" if record.get("price_vnd") else "Thỏa thuận"
+            log.info(
+                "[%d/%d] Đã lưu: %s | %s | %s | %s",
+                i, total, record["district"], record["room_type"], price_display, title[:35]
+            )
             stats["saved"] += 1
         else:
-            # insert_rental trả False nếu URL duplicate
-            log.info("  → URL đã tồn tại (bỏ qua)")
+            log.info("[%d/%d] URL đã tồn tại: %s", i, total, record["url"])
 
     return stats
 
 
 # ── Pipeline chính ────────────────────────────────────────────────────
 def run_pipeline() -> None:
-    """Chạy toàn bộ chu trình: Thu thập → Lọc trùng → AI phân tích → Lưu DB."""
+    """Chạy toàn bộ chu trình: Thu thập → Lọc trùng → Regex phân tích → Lưu DB."""
     start = datetime.now()
     log.info("═══ BẮT ĐẦU CHU TRÌNH PIPELINE ═══")
 
@@ -154,13 +143,13 @@ def run_pipeline() -> None:
         log.info("Không có bài đăng mới nào. Kết thúc chu trình.")
         return
 
-    # 2. Lọc URL trùng (tiết kiệm token OpenRouter)
+    # 2. Lọc URL trùng (không quét lại tin cũ)
     new_items = _filter_new_items(raw_items)
     if not new_items:
-        log.info("Tất cả URL đã có trong DB. Không cần gọi AI. Kết thúc chu trình.")
+        log.info("Tất cả URL đã có trong DB. Kết thúc chu trình.")
         return
 
-    # 3 + 4. Phân tích AI & lưu
+    # 3 + 4. Phân tích & lưu
     stats = _analyze_and_save(new_items)
 
     elapsed = (datetime.now() - start).total_seconds()
@@ -176,7 +165,7 @@ def main() -> None:
     init_db()
     log.info("Database sẵn sàng.")
 
-    # Chạy một lần duy nhất nếu có cờ --once (ví dụ gọi từ Streamlit Cloud)
+    # Chạy một lần duy nhất nếu có cờ --once (gọi từ Streamlit Cloud hoặc CLI)
     if "--once" in sys.argv:
         log.info("Chế độ chạy một lần (--once). Bắt đầu quét...")
         run_pipeline()

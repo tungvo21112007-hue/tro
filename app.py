@@ -15,10 +15,9 @@ import streamlit as st
 # ── Đồng bộ Streamlit Secrets sang os.environ (Hỗ trợ Streamlit Cloud) ─
 try:
     if hasattr(st, "secrets"):
-        for key in ["OPENROUTER_API_KEY", "OPENROUTER_MODEL", "FB_GROUP_URLS"]:
+        for key in ["FB_GROUP_URLS"]:
             if key in st.secrets and not os.environ.get(key):
                 os.environ[key] = str(st.secrets[key])
-        # Đồng bộ thêm tất cả string secrets khác nếu có
         for k, v in getattr(st.secrets, "_secrets", {}).items():
             if isinstance(v, str) and not os.environ.get(k):
                 os.environ[k] = v
@@ -187,13 +186,9 @@ with col_count:
 
 with col_btn:
     if st.button("🔄 Quét tin mới ngay", use_container_width=True):
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key or not api_key.strip():
-            st.error("Chưa cấu hình OPENROUTER_API_KEY trong Streamlit Secrets!")
-        else:
-            _run_pipeline_manual()
-            st.toast("Đang chạy pipeline quét tin mới… Vui lòng đợi 1–2 phút rồi tải lại trang.", icon="⏳")
-            st.info("⏳ **Đang tiến hành cào và lọc tin mới trong nền!**\n\nBạn có thể theo dõi tiến trình trong phần **Manage app** (Logs) của Streamlit Cloud. Sau khoảng 1–2 phút, hãy nhấn `F5` hoặc tải lại trang để cập nhật danh sách phòng mới.")
+        _run_pipeline_manual()
+        st.toast("Đang quét tin mới từ các nguồn… Vui lòng đợi 1–2 phút rồi tải lại trang.", icon="⏳")
+        st.info("⏳ **Đang tiến hành cào và lọc tin mới trong nền (0 tốn token AI)!**\n\nBạn có thể theo dõi tiến trình trong phần **Manage app** (Logs) của Streamlit Cloud. Sau khoảng 1–2 phút, hãy nhấn `F5` hoặc tải lại trang để xem danh sách phòng mới.")
 
 st.divider()
 
