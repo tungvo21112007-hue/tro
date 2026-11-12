@@ -168,6 +168,39 @@ def _extract_post_text(item) -> str:
         return ""
 
 
+def _extract_post_image(item) -> Optional[str]:
+    """
+    Trích xuất link ảnh bài viết từ Facebook.
+    Chỉ lấy ảnh nội dung (scontent/fbcdn), bỏ qua ảnh avatar tác giả và icon emoji.
+    """
+    try:
+        imgs = item.locator("img").all()
+        for img in imgs:
+            src = img.get_attribute("src") or ""
+            if not src or not ("scontent" in src or "fbcdn" in src):
+                continue
+            # Bỏ qua icon hoặc asset tĩnh
+            if any(x in src for x in ["/rsrc.php/", "emoji.php", "/assets/"]):
+                continue
+
+            alt = (img.get_attribute("alt") or "").lower()
+            if "ảnh đại diện" in alt or "avatar" in alt:
+                continue
+
+            # Kiểm tra kích thước nếu có thể để loại avatar nhỏ (thường < 60px)
+            try:
+                box = img.bounding_box()
+                if box and (box["width"] < 70 or box["height"] < 70):
+                    continue
+            except Exception:
+                pass
+
+            return src
+    except Exception:
+        pass
+    return None
+
+
 def _extract_posts(page, group_url: str, limit: int, max_scrolls: int = 4) -> List[Dict[str, Any]]:
     """Cuộn trang 3-5 lần, bấm 'Xem thêm', trích xuất bài đăng và lọc trùng link."""
     posts: Dict[str, Dict[str, Any]] = {}
@@ -202,6 +235,7 @@ def _extract_posts(page, group_url: str, limit: int, max_scrolls: int = 4) -> Li
                     continue
 
                 title = text.split("\n")[0][:50].strip() or text[:50].strip()
+                image_url = _extract_post_image(item)
 
                 posts[post_url] = {
                     "title": title,
@@ -209,6 +243,7 @@ def _extract_posts(page, group_url: str, limit: int, max_scrolls: int = 4) -> Li
                     "url": post_url,
                     "source": "Facebook",
                     "posted_time": datetime.now().isoformat(),
+                    "image_url": image_url,
                 }
             except Exception:
                 continue

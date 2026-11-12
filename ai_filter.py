@@ -179,6 +179,63 @@ def extract_room_type(text: str) -> str:
     return "Phòng trọ"
 
 
+# Regex nhận diện số điện thoại di động Việt Nam (10 số, đầu 03, 05, 07, 08, 09)
+PHONE_RE = re.compile(
+    r'(?:\+?84|0)(?:3[2-9]|5[25689]|7[06-9]|8[1-9]|9\d)[\s.-]?(?:\d[\s.-]?){7}\b'
+)
+
+
+def extract_phone(text: str) -> Optional[str]:
+    """
+    Bóc tách số điện thoại di động Việt Nam từ văn bản.
+    Chuẩn hóa về dạng 10 chữ số chuẩn: 0XXXXXXXXX.
+    """
+    if not text:
+        return None
+
+    matches = PHONE_RE.findall(text)
+    for m in matches:
+        # Làm sạch các ký tự phân cách
+        cleaned = re.sub(r'[\s.\-+()]', '', m)
+        if cleaned.startswith("84") and len(cleaned) == 11:
+            cleaned = "0" + cleaned[2:]
+        if len(cleaned) == 10 and cleaned.startswith(("03", "05", "07", "08", "09")):
+            return cleaned
+
+    # Fallback quét chuỗi số 10 số liền nhau
+    fallback = re.findall(r'\b(0[35789]\d{8})\b', text)
+    if fallback:
+        return fallback[0]
+
+    return None
+
+
+AREA_RE = re.compile(
+    r'(\d+(?:[.,]\d+)?)\s*(?:m2|m²|mét vuông|met vuong)\b',
+    re.IGNORECASE,
+)
+
+
+def extract_area_m2(text: str) -> Optional[float]:
+    """
+    Bóc tách diện tích phòng (m2) từ văn bản bằng Regex.
+    Giới hạn diện tích thực tế từ 8 m² đến 200 m².
+    """
+    if not text:
+        return None
+
+    matches = AREA_RE.findall(text)
+    for m in matches:
+        try:
+            val = float(m.replace(',', '.'))
+            if 8.0 <= val <= 200.0:
+                return round(val, 1)
+        except ValueError:
+            continue
+
+    return None
+
+
 def filter_and_extract(
     title: str,
     raw_content: str,
@@ -195,6 +252,9 @@ def filter_and_extract(
             "price_vnd": Optional[int],
             "district": str,
             "room_type": str,
+            "phone": Optional[str],
+            "area_m2": Optional[float],
+            "image_url": Optional[str],
         }
     """
     existing_data = existing_data or {}
@@ -209,6 +269,9 @@ def filter_and_extract(
                 "price_vnd": None,
                 "district": "Khác",
                 "room_type": "Phòng trọ",
+                "phone": None,
+                "area_m2": None,
+                "image_url": None,
             }
 
     # 2. Kiểm tra có phải tin cho thuê phòng không
@@ -223,6 +286,9 @@ def filter_and_extract(
             "price_vnd": None,
             "district": "Khác",
             "room_type": "Phòng trọ",
+            "phone": None,
+            "area_m2": None,
+            "image_url": None,
         }
 
     # 3. Lấy hoặc bóc tách giá tiền
@@ -245,12 +311,28 @@ def filter_and_extract(
     # 6. Phân loại phòng
     room_type = existing_data.get("room_type") or extract_room_type(full_text)
 
+    # 7. Bóc tách số điện thoại liên hệ
+    phone = existing_data.get("phone")
+    if not phone:
+        phone = extract_phone(f"{title} {raw_content}")
+
+    # 8. Bóc tách diện tích phòng (m2)
+    area_m2 = existing_data.get("area_m2")
+    if area_m2 is None:
+        area_m2 = extract_area_m2(f"{title} {raw_content}")
+
+    # 9. Ảnh đại diện bài viết
+    image_url = existing_data.get("image_url")
+
     return {
         "is_valid_rental": True,
         "is_spam": is_spam,
         "price_vnd": price_vnd,
         "district": district or "Khác",
         "room_type": room_type,
+        "phone": phone,
+        "area_m2": area_m2,
+        "image_url": image_url,
     }
 
 

@@ -8,9 +8,12 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+from ai_filter import extract_area_m2, extract_phone
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("web_crawler")
@@ -186,12 +189,42 @@ def crawl_phongtro123(pages: int = 2) -> List[Dict[str, Any]]:
 
             room_type = detect_room_type(f"{title} {raw_content}")
 
+            # Bóc tách thumbnail ảnh
+            img_el = item.select_one("figure img, .post__thumb img, img")
+            image_url = None
+            if img_el:
+                src_val = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original")
+                if src_val:
+                    image_url = src_val if src_val.startswith("http") else urljoin(PT_BASE, src_val)
+
+            # Bóc tách diện tích (m²)
+            area_m2 = None
+            for s in item.select("span"):
+                s_txt = s.get_text(strip=True)
+                if "m2" in s_txt or "m²" in s_txt:
+                    area_m2 = extract_area_m2(s_txt)
+                    if area_m2:
+                        break
+            if area_m2 is None:
+                area_m2 = extract_area_m2(raw_content)
+
+            # Bóc tách số điện thoại
+            tel_link = item.select_one("a[href^='tel:']")
+            phone = None
+            if tel_link:
+                phone = extract_phone(tel_link["href"])
+            if not phone:
+                phone = extract_phone(raw_content)
+
             results.append({
                 "title": title[:50],
                 "raw_content": raw_content,
                 "price_vnd": price_vnd,
                 "district": district,
                 "room_type": room_type,
+                "image_url": image_url,
+                "phone": phone,
+                "area_m2": area_m2,
                 "url": url,
                 "source": "Phongtro123",
                 "posted_time": _pt_time(item),
@@ -255,6 +288,27 @@ def crawl_chotot(pages: int = 2) -> List[Dict[str, Any]]:
 
             room_type = detect_room_type(f"{subject} {body}")
 
+            # Bóc tách thumbnail ảnh
+            image_url = ad.get("image")
+            if not image_url and ad.get("images"):
+                image_url = ad["images"][0]
+
+            # Bóc tách diện tích (m²)
+            area_m2 = None
+            size_val = ad.get("size")
+            try:
+                if size_val is not None and float(size_val) > 0:
+                    area_m2 = round(float(size_val), 1)
+            except (ValueError, TypeError):
+                area_m2 = None
+            if area_m2 is None:
+                area_m2 = extract_area_m2(raw_content)
+
+            # Bóc tách số điện thoại
+            phone = ad.get("phone")
+            if not phone:
+                phone = extract_phone(f"{subject} {body}")
+
             ts = ad.get("list_time")  # epoch ms
             posted_time = (
                 datetime.fromtimestamp(ts / 1000).isoformat() if ts else datetime.now().isoformat()
@@ -266,6 +320,9 @@ def crawl_chotot(pages: int = 2) -> List[Dict[str, Any]]:
                 "price_vnd": price_vnd,
                 "district": district,
                 "room_type": room_type,
+                "image_url": image_url,
+                "phone": phone,
+                "area_m2": area_m2,
                 "url": f"https://www.nhatot.com/{list_id}.htm",
                 "source": "Chotot",
                 "posted_time": posted_time,

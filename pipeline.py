@@ -116,6 +116,9 @@ def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
             "source": item.get("source"),
             "posted_time": item.get("posted_time"),
             "created_at": datetime.now().isoformat(),
+            "image_url": analysis.get("image_url") or item.get("image_url"),
+            "phone": analysis.get("phone") or item.get("phone"),
+            "area_m2": analysis.get("area_m2") if analysis.get("area_m2") is not None else item.get("area_m2"),
         }
 
         if insert_rental(record):
