@@ -3,12 +3,27 @@ app.py – Streamlit dashboard tìm phòng trọ Đà Nẵng.
 Chạy: streamlit run app.py
 """
 
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+# ── Đồng bộ Streamlit Secrets sang os.environ (Hỗ trợ Streamlit Cloud) ─
+try:
+    if hasattr(st, "secrets"):
+        for key in ["OPENROUTER_API_KEY", "OPENROUTER_MODEL", "FB_GROUP_URLS"]:
+            if key in st.secrets and not os.environ.get(key):
+                os.environ[key] = str(st.secrets[key])
+        # Đồng bộ thêm tất cả string secrets khác nếu có
+        for k, v in getattr(st.secrets, "_secrets", {}).items():
+            if isinstance(v, str) and not os.environ.get(k):
+                os.environ[k] = v
+except Exception:
+    pass
 
 from database import get_rentals, init_db
 
@@ -71,9 +86,11 @@ def _format_time(iso_str) -> str:
 
 def _run_pipeline_manual():
     """Gọi pipeline.run_pipeline() trong subprocess để không block Streamlit."""
+    cwd = Path(__file__).resolve().parent
     subprocess.Popen(
         [sys.executable, "-c", "from pipeline import run_pipeline; run_pipeline()"],
-        cwd=__import__("pathlib").Path(__file__).resolve().parent,
+        cwd=cwd,
+        env=os.environ.copy(),
     )
 
 

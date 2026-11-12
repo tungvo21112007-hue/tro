@@ -4,6 +4,8 @@ fb_crawler.py – Cào bài viết Facebook Group cho thuê trọ Đà Nẵng b�
 Lưu ý: Facebook thường chặn khách chưa đăng nhập. Để ổn định, đăng nhập 1 lần để lưu session:
     python fb_crawler.py --login
 Session lưu ở thư mục fb_profile/ (đã nằm trong .gitignore).
+Trên môi trường Cloud (ví dụ Streamlit Cloud), nếu thiếu browser hoặc bị chặn, module sẽ tự động
+bỏ qua an toàn và trả về danh sách rỗng, không làm sập pipeline.
 """
 
 import logging
@@ -15,9 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-from playwright.sync_api import sync_playwright
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("fb_crawler")
 
 PROFILE_DIR = Path(__file__).resolve().parent / "fb_profile"
 
@@ -71,7 +72,7 @@ def _extract_posts(page, limit: int) -> List[Dict[str, Any]]:
                     "raw_content": text,
                     "url": url,
                     "source": "Facebook",
-                    # shortcut: Facebook giấu timestamp tuyệt đối, dùng giờ cào; nâng cấp bằng parse aria-label khi cần
+                    # shortcut: Facebook giấu timestamp tuyệt đối, dùng giờ cào
                     "posted_time": datetime.now().isoformat(),
                 }
             except Exception:
@@ -90,37 +91,60 @@ def crawl_fb_groups(
     results_limit: int = DEFAULT_RESULTS_LIMIT,
     headless: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Mở từng group công khai, cuộn trang, trả list dict {title, raw_content, url, source, posted_time}."""
+    """
+    Mở từng group công khai, cuộn trang, trả list dict {title, raw_content, url, source, posted_time}.
+    Toàn bộ logic bọc try-except an toàn: nếu thiếu Chromium / lỗi môi trường trên Cloud,
+    log cảnh báo và trả về [], tuyệt đối không làm crash pipeline.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        log.warning("Thư viện playwright chưa được cài đặt: %s. Bỏ qua cào Facebook.", e)
+        return []
+
     urls = group_urls or [
         u.strip() for u in os.getenv("FB_GROUP_URLS", "").split(",") if u.strip()
     ] or DEFAULT_GROUP_URLS
     results: List[Dict[str, Any]] = []
 
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            str(PROFILE_DIR), headless=headless, locale="vi-VN"
-        )
-        page = ctx.new_page()
-        for url in urls:
+    try:
+        with sync_playwright() as p:
             try:
-                logging.info("Mở group: %s", url)
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)
-                if "login" in page.url or page.locator("input[name='pass']").count():
-                    logging.warning("Facebook yêu cầu đăng nhập, bỏ qua %s (chạy --login).", url)
-                    continue
-                items = _extract_posts(page, results_limit)
-                logging.info("  → %d bài", len(items))
-                results.extend(items)
+                ctx = p.chromium.launch_persistent_context(
+                    str(PROFILE_DIR), headless=headless, locale="vi-VN"
+                )
             except Exception as e:
-                logging.error("Lỗi khi cào %s: %s", url, e)
-        ctx.close()
+                log.warning(
+                    "Không thể khởi chạy Chromium bằng Playwright "
+                    "(thường do môi trường Cloud thiếu browser binary hoặc sandbox): %s", e
+                )
+                return []
+
+            page = ctx.new_page()
+            for url in urls:
+                try:
+                    log.info("Mở Facebook group: %s", url)
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(3000)
+                    if "login" in page.url or page.locator("input[name='pass']").count():
+                        log.warning("Facebook yêu cầu đăng nhập, bỏ qua %s (chạy --login).", url)
+                        continue
+                    items = _extract_posts(page, results_limit)
+                    log.info("  → Thu thập được %d bài từ %s", len(items), url)
+                    results.extend(items)
+                except Exception as e:
+                    log.error("Lỗi khi cào %s: %s", url, e)
+            ctx.close()
+    except Exception as e:
+        log.warning("Lỗi tổng quát trong quá trình chạy Playwright Facebook crawler: %s", e)
+        return []
 
     return results
 
 
 def login_interactive() -> None:
     """Mở trình duyệt có giao diện để user đăng nhập tay, session được lưu vào fb_profile/."""
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(str(PROFILE_DIR), headless=False)
         page = ctx.new_page()

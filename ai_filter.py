@@ -8,7 +8,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 from pydantic import BaseModel, Field
 
 logging.basicConfig(
@@ -27,6 +27,11 @@ DANANG_DISTRICTS = [
 ]
 
 DEFAULT_MODEL = "google/gemini-2.5-flash"
+
+
+class QuotaExceededError(Exception):
+    """Ngoại lệ khi OpenRouter API hết credit (402), sai API key (401), hoặc bị rate limit (429)."""
+    pass
 
 
 # ── Pydantic schema cho structured output ────────────────────────────
@@ -132,13 +137,13 @@ def _get_client() -> OpenAI:
 
 
 def _get_model() -> str:
-    return os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
+    return os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
 
 
 def analyze_rental(title: str, raw_content: str) -> Dict[str, Any]:
     """
-    Gửi nội dung tin đăng tới OpenRouter (Gemini 2.5 Flash), nhận về
-    kết quả phân loại và chuẩn hóa dưới dạng dict.
+    Gửi nội dung tin đăng tới OpenRouter, nhận về kết quả phân loại và chuẩn hóa.
+    Nếu gặp lỗi hạn mức/credit (402), sai key (401), hoặc rate limit (429), raise QuotaExceededError.
 
     Returns:
         Dict với các key: is_valid_rental, is_spam, price_vnd, district, room_type
@@ -151,6 +156,7 @@ def analyze_rental(title: str, raw_content: str) -> Dict[str, Any]:
         response = client.chat.completions.create(
             model=model,
             temperature=0.1,
+            max_tokens=1024,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -168,10 +174,21 @@ def analyze_rental(title: str, raw_content: str) -> Dict[str, Any]:
             result = RentalAnalysis.model_validate(parsed)
             return result.model_dump()
 
+    except APIStatusError as e:
+        if e.status_code in (401, 402, 429):
+            msg = f"OpenRouter API gặp lỗi HTTP {e.status_code} ({e.message})"
+            logging.error(msg)
+            raise QuotaExceededError(msg) from e
+        logging.warning("Lỗi APIStatusError khi gọi OpenRouter cho tin '%s': %s", title[:40], e)
     except Exception as e:
+        status_code = getattr(e, "status_code", None)
+        if status_code in (401, 402, 429):
+            msg = f"OpenRouter API gặp lỗi HTTP {status_code}: {e}"
+            logging.error(msg)
+            raise QuotaExceededError(msg) from e
         logging.warning("Lỗi khi gọi OpenRouter API cho tin '%s': %s", title[:40], e)
 
-    # Fallback an toàn — không chặn pipeline
+    # Fallback an toàn cho các lỗi mạng thông thường không phải do hết hạn mức
     return {
         "is_valid_rental": False,
         "is_spam": False,

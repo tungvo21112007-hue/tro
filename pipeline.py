@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from ai_filter import analyze_rental
+from ai_filter import QuotaExceededError, analyze_rental
 from database import init_db, insert_rental, url_exists
 from fb_crawler import crawl_fb_groups
 from web_crawler import crawl_chotot, crawl_phongtro123
@@ -78,6 +78,8 @@ def _filter_new_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
     """
     Gửi từng bài qua OpenRouter để phân loại, chỉ lưu bài hợp lệ vào SQLite.
+    Nếu gặp QuotaExceededError (402, 401, 429), break dừng ngay chu trình và
+    không lưu URL của các bài bị lỗi vào database để xử lý lại lần sau.
     Trả về thống kê {saved, spam, invalid, error}.
     """
     stats = {"saved": 0, "spam": 0, "invalid": 0, "error": 0}
@@ -91,8 +93,16 @@ def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
 
         try:
             analysis = analyze_rental(title, raw_content)
+        except QuotaExceededError as e:
+            log.error(
+                "DỪNG CHU TRÌNH: OpenRouter hết credit hoặc lỗi API key (%s). "
+                "Bỏ qua %d tin còn lại để xử lý lại ở chu trình sau.",
+                e, total - i + 1,
+            )
+            stats["error"] += (total - i + 1)
+            break
         except Exception as e:
-            log.warning("Lỗi AI cho '%s': %s", title[:40], e)
+            log.warning("Lỗi không mong muốn khi gọi AI cho '%s': %s", title[:40], e)
             stats["error"] += 1
             continue
 
@@ -126,7 +136,7 @@ def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
                      f"{analysis.get('price_vnd'):,}đ" if analysis.get("price_vnd") else "N/A")
             stats["saved"] += 1
         else:
-            # insert_rental trả False nếu URL duplicate (race condition edge case)
+            # insert_rental trả False nếu URL duplicate
             log.info("  → URL đã tồn tại (bỏ qua)")
 
     return stats
