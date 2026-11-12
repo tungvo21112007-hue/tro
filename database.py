@@ -147,15 +147,17 @@ def get_rentals(
         conditions.append("source = ?")
         params.append(source)
 
-    # 4. Lọc khoảng giá
+    # 4. Lọc khoảng giá (Luôn giữ lại tin giá thỏa thuận / 0đ / NULL để không bỏ sót các tin Facebook)
     min_price = filters.get("min_price") if filters.get("min_price") is not None else filters.get("min_price_vnd")
-    if min_price is not None:
-        conditions.append("price_vnd >= ?")
-        params.append(int(min_price))
-
     max_price = filters.get("max_price") if filters.get("max_price") is not None else filters.get("max_price_vnd")
-    if max_price is not None:
-        conditions.append("price_vnd <= ?")
+    if min_price is not None and max_price is not None:
+        conditions.append("((price_vnd >= ? AND price_vnd <= ?) OR price_vnd IS NULL OR price_vnd = 0)")
+        params.extend([int(min_price), int(max_price)])
+    elif min_price is not None:
+        conditions.append("(price_vnd >= ? OR price_vnd IS NULL OR price_vnd = 0)")
+        params.append(int(min_price))
+    elif max_price is not None:
+        conditions.append("(price_vnd <= ? OR price_vnd IS NULL OR price_vnd = 0)")
         params.append(int(max_price))
 
     # 5. Lọc diện tích

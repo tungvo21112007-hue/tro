@@ -49,6 +49,37 @@ RENTAL_KEYWORDS = [
     "ccmn",
 ]
 
+# Từ khóa nhà ở nới lỏng cho Facebook Groups
+FB_HOUSING_KEYWORDS = [
+    "phòng",
+    "phong",
+    "trọ",
+    "tro",
+    "căn hộ",
+    "can ho",
+    "studio",
+    "ở ghép",
+    "o ghep",
+    "nhà nguyên căn",
+    "nha nguyen can",
+    "nguyên căn",
+    "giường tầng",
+    "giuong tang",
+    "kí túc xá",
+    "ki tuc xa",
+    "ktx",
+    "full nội thất",
+    "full noi that",
+    "gác lửng",
+    "gac lung",
+    "khép kín",
+    "khep kin",
+    "còn trống",
+    "con trong",
+    "cho thuê",
+    "cho thue",
+]
+
 # ── 2. Từ điển ánh xạ quận, phường, đường tại Đà Nẵng ─────────────────
 DANANG_DISTRICTS = [
     "Hải Châu",
@@ -276,20 +307,35 @@ def filter_and_extract(
 
     # 2. Kiểm tra có phải tin cho thuê phòng không
     source = existing_data.get("source", "").lower()
+    is_facebook = "facebook" in source
     is_from_rental_site = source in ["phongtro123", "chotot"]
-    has_rental_keyword = any(k in full_text for k in RENTAL_KEYWORDS)
 
-    if not is_from_rental_site and not has_rental_keyword:
-        return {
-            "is_valid_rental": False,
-            "is_spam": False,
-            "price_vnd": None,
-            "district": "Khác",
-            "room_type": "Phòng trọ",
-            "phone": None,
-            "area_m2": None,
-            "image_url": None,
-        }
+    if is_facebook:
+        has_fb_keyword = any(k in full_text for k in FB_HOUSING_KEYWORDS)
+        if not has_fb_keyword:
+            return {
+                "is_valid_rental": False,
+                "is_spam": False,
+                "price_vnd": None,
+                "district": "Khác",
+                "room_type": "Phòng trọ",
+                "phone": None,
+                "area_m2": None,
+                "image_url": None,
+            }
+    else:
+        has_rental_keyword = any(k in full_text for k in RENTAL_KEYWORDS)
+        if not is_from_rental_site and not has_rental_keyword:
+            return {
+                "is_valid_rental": False,
+                "is_spam": False,
+                "price_vnd": None,
+                "district": "Khác",
+                "room_type": "Phòng trọ",
+                "phone": None,
+                "area_m2": None,
+                "image_url": None,
+            }
 
     # 3. Lấy hoặc bóc tách giá tiền
     price_vnd = existing_data.get("price_vnd")
@@ -298,10 +344,20 @@ def filter_and_extract(
 
     # 4. Kiểm tra giá ảo / spam
     is_spam = False
-    if price_vnd is not None:
-        # Giá < 500,000 VND (1k, 0đ, 1000đ) hoặc > 50 triệu (bán đất/nhà) -> coi là spam
-        if price_vnd < 500_000 or price_vnd > 50_000_000:
-            is_spam = True
+    if is_facebook:
+        # Đối với bài Facebook: nếu không bóc tách được giá (None hoặc <= 0), lưu price_vnd = 0 (Thỏa thuận)
+        # Giữ lại để hiển thị thay vì đánh dấu bài không hợp lệ
+        if price_vnd is None or price_vnd <= 0:
+            price_vnd = 0
+            is_spam = False
+        else:
+            if price_vnd < 500_000 or price_vnd > 50_000_000:
+                is_spam = True
+    else:
+        if price_vnd is not None:
+            # Giá < 500,000 VND (1k, 0đ, 1000đ) hoặc > 50 triệu (bán đất/nhà) -> coi là spam
+            if price_vnd < 500_000 or price_vnd > 50_000_000:
+                is_spam = True
 
     # 5. Lấy hoặc bóc tách quận/huyện
     district = existing_data.get("district")

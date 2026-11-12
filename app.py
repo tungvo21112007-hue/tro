@@ -144,7 +144,7 @@ st.markdown(
 # ── Helpers ──────────────────────────────────────────────────────────
 def _format_price(value) -> str:
     if value is None or (isinstance(value, (int, float)) and value <= 0):
-        return "Thỏa thuận"
+        return "Giá thỏa thuận"
     if isinstance(value, (int, float)):
         if value >= 1_000_000:
             val_tr = value / 1_000_000
@@ -342,9 +342,14 @@ with col_action:
         st.info("⏳ **Đang cào dữ liệu trong nền!**\n\nHãy theo dõi tab **Manage app** (Logs) hoặc đợi 1–2 phút rồi nhấn `F5` để tải lại dữ liệu mới nhất.")
 
 # Thanh thống kê
+fb_count = sum(1 for r in rows if (r.get("source") or "").lower() == "facebook")
+pt_count = sum(1 for r in rows if "phongtro" in (r.get("source") or "").lower())
+ct_count = sum(1 for r in rows if "chotot" in (r.get("source") or "").lower())
+
 col_m1, col_m2, col_m3 = st.columns(3)
 with col_m1:
     st.metric("Kết quả phù hợp", f"{len(rows)} phòng")
+    st.caption(f"🔵 Facebook: **{fb_count}** | 🟠 Phongtro123: **{pt_count}** | 🟢 Chợ Tốt: **{ct_count}**")
 with col_m2:
     with_phone_cnt = sum(1 for r in rows if r.get("phone"))
     st.metric("Tin có số điện thoại", f"{with_phone_cnt} ({int(with_phone_cnt / max(1, len(rows)) * 100)}%)")
