@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from ai_filter import filter_and_extract
-from database import init_db, insert_rental, url_exists
+from database import cleanup_old_rentals, init_db, insert_rental, url_exists
 from fb_crawler import crawl_fb_groups
 from web_crawler import crawl_chotot, crawl_phongtro123
 
@@ -154,6 +154,14 @@ def run_pipeline() -> None:
 
     # 3 + 4. Phân tích & lưu
     stats = _analyze_and_save(new_items)
+
+    # 5. Tự động dọn dẹp các tin đăng cũ hơn 14 ngày để giữ dung lượng DB nhỏ gọn (< 2MB)
+    try:
+        deleted = cleanup_old_rentals(days=14)
+        if deleted > 0:
+            log.info("Dọn dẹp DB: đã xóa %d tin đăng cũ hơn 14 ngày (VACUUM hoàn tất).", deleted)
+    except Exception as e:
+        log.warning("Lỗi dọn dẹp tin cũ trong DB: %s", e)
 
     elapsed = (datetime.now() - start).total_seconds()
     log.info(

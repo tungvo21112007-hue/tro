@@ -3,9 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# SQLite database
-*.db
-*.sqlite3
+# SQLite database (rentals.db tracked by git for Streamlit Cloud sync)
+# *.db-journal / temp files
+*.db-journal
+*.sqlite3-journal
 
 # Environment variables & secrets
 .env

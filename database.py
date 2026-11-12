@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -217,6 +217,31 @@ def get_rentals(
     with get_connection(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+
+def cleanup_old_rentals(days: int = 14, db_path: Path = DB_PATH) -> int:
+    """
+    Tự động dọn dẹp các tin đăng cũ hơn `days` ngày để giữ file SQLite luôn gọn nhẹ (< 2MB)
+    khi lưu trữ và đồng bộ qua Git. Chạy VACUUM nếu có bản ghi bị xóa.
+    Trả về số lượng bản ghi đã được dọn dẹp.
+    """
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    delete_sql = """
+    DELETE FROM rentals
+    WHERE (posted_time IS NOT NULL AND posted_time < ?)
+       OR (posted_time IS NULL AND created_at < ?);
+    """
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(delete_sql, (cutoff, cutoff))
+        deleted_count = cursor.rowcount
+        conn.commit()
+
+        # Tối ưu kích thước file DB nếu có bản ghi bị xóa
+        if deleted_count > 0:
+            conn.execute("VACUUM;")
+            conn.commit()
+
+        return deleted_count
 
 
 if __name__ == "__main__":
