@@ -15,8 +15,16 @@ from typing import Any, Dict, List
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from ai_filter import filter_and_extract
-from database import cleanup_old_rentals, init_db, insert_rental, url_exists
+from database import (
+    cleanup_old_rentals,
+    init_db,
+    insert_job,
+    insert_rental,
+    job_url_exists,
+    url_exists,
+)
 from fb_crawler import crawl_fb_groups
+from job_crawler import crawl_all_jobs
 from web_crawler import crawl_chotot, crawl_phongtro123
 
 logging.basicConfig(
@@ -135,40 +143,65 @@ def _analyze_and_save(items: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 # ── Pipeline chính ────────────────────────────────────────────────────
+def run_job_pipeline() -> None:
+    """Thu thập, lọc trùng và lưu tin việc làm Đà Nẵng vào bảng jobs."""
+    log.info("── Bắt đầu cào việc làm Đà Nẵng ──")
+    try:
+        raw_jobs = crawl_all_jobs()
+    except Exception as e:
+        log.error("Lỗi khi cào việc làm: %s", e)
+        return
+
+    saved = 0
+    skipped = 0
+    for job in raw_jobs:
+        url = job.get("url")
+        if not url:
+            continue
+        if job_url_exists(url):
+            skipped += 1
+            continue
+        if insert_job(job):
+            saved += 1
+
+    log.info("Việc làm Đà Nẵng: đã lưu %d tin mới, bỏ qua %d tin đã có.", saved, skipped)
+
+
 def run_pipeline() -> None:
     """Chạy toàn bộ chu trình: Thu thập → Lọc trùng → Regex phân tích → Lưu DB."""
     start = datetime.now()
     log.info("═══ BẮT ĐẦU CHU TRÌNH PIPELINE ═══")
 
-    # 1. Thu thập
+    # 1. Thu thập phòng trọ
     raw_items = _collect_all()
     if not raw_items:
-        log.info("Không có bài đăng mới nào. Kết thúc chu trình.")
-        return
+        log.info("Không có bài đăng phòng trọ mới nào.")
+    else:
+        # 2. Lọc URL trùng (không quét lại tin cũ)
+        new_items = _filter_new_items(raw_items)
+        if not new_items:
+            log.info("Tất cả URL phòng trọ đã có trong DB.")
+        else:
+            # 3 + 4. Phân tích & lưu
+            stats = _analyze_and_save(new_items)
+            log.info(
+                "Phòng trọ: Đã lưu: %d | Spam: %d | Không hợp lệ: %d | Lỗi: %d",
+                stats["saved"], stats["spam"], stats["invalid"], stats["error"],
+            )
 
-    # 2. Lọc URL trùng (không quét lại tin cũ)
-    new_items = _filter_new_items(raw_items)
-    if not new_items:
-        log.info("Tất cả URL đã có trong DB. Kết thúc chu trình.")
-        return
+    # 5. Thu thập & lưu việc làm Đà Nẵng
+    run_job_pipeline()
 
-    # 3 + 4. Phân tích & lưu
-    stats = _analyze_and_save(new_items)
-
-    # 5. Tự động dọn dẹp các tin đăng cũ hơn 14 ngày để giữ dung lượng DB nhỏ gọn (< 2MB)
+    # 6. Tự động dọn dẹp các tin đăng cũ hơn 14 ngày để giữ dung lượng DB nhỏ gọn (< 2MB)
     try:
         deleted = cleanup_old_rentals(days=14)
         if deleted > 0:
-            log.info("Dọn dẹp DB: đã xóa %d tin đăng cũ hơn 14 ngày (VACUUM hoàn tất).", deleted)
+            log.info("Dọn dẹp DB: đã xóa %d tin đăng cũ (VACUUM hoàn tất).", deleted)
     except Exception as e:
         log.warning("Lỗi dọn dẹp tin cũ trong DB: %s", e)
 
     elapsed = (datetime.now() - start).total_seconds()
-    log.info(
-        "═══ KẾT THÚC CHU TRÌNH (%.1fs) ═══  "
-        "Đã lưu: %d | Spam: %d | Không hợp lệ: %d | Lỗi: %d",
-        elapsed, stats["saved"], stats["spam"], stats["invalid"], stats["error"],
-    )
+    log.info("═══ KẾT THÚC CHU TRÌNH (%.1fs) ═══", elapsed)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────

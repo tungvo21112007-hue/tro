@@ -48,6 +48,29 @@ def init_db(db_path: Path = DB_PATH) -> None:
             if col_name not in existing_cols:
                 conn.execute(f"ALTER TABLE rentals ADD COLUMN {col_name} {col_type};")
 
+        # Bảng việc làm Đà Nẵng
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                company TEXT,
+                raw_content TEXT,
+                salary_text TEXT,
+                salary_min_vnd INTEGER,
+                salary_max_vnd INTEGER,
+                district TEXT,
+                job_type TEXT,
+                url TEXT UNIQUE,
+                source TEXT,
+                posted_time DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                image_url TEXT,
+                phone TEXT
+            );
+            """
+        )
+
         conn.commit()
 
 
@@ -239,11 +262,143 @@ def cleanup_old_rentals(days: int = 14, db_path: Path = DB_PATH) -> int:
         conn.commit()
 
         # Tối ưu kích thước file DB nếu có bản ghi bị xóa
+        jobs_cutoff = (datetime.now() - timedelta(days=21)).isoformat()
+        jobs_cursor = conn.execute(
+            """
+            DELETE FROM jobs
+            WHERE (posted_time IS NOT NULL AND posted_time < ?)
+               OR (posted_time IS NULL AND created_at < ?);
+            """,
+            (jobs_cutoff, jobs_cutoff),
+        )
+        deleted_count += jobs_cursor.rowcount
+        conn.commit()
+
         if deleted_count > 0:
             conn.execute("VACUUM;")
             conn.commit()
 
         return deleted_count
+
+
+def insert_job(data: Dict[str, Any], db_path: Path = DB_PATH) -> bool:
+    """Thêm bản ghi việc làm mới vào bảng jobs (INSERT OR IGNORE theo url)."""
+    sql = """
+    INSERT OR IGNORE INTO jobs (
+        title, company, raw_content, salary_text,
+        salary_min_vnd, salary_max_vnd, district, job_type,
+        url, source, posted_time, created_at, image_url, phone
+    ) VALUES (
+        :title, :company, :raw_content, :salary_text,
+        :salary_min_vnd, :salary_max_vnd, :district, :job_type,
+        :url, :source, :posted_time, :created_at, :image_url, :phone
+    );
+    """
+    payload = {
+        "title": data.get("title"),
+        "company": data.get("company"),
+        "raw_content": data.get("raw_content"),
+        "salary_text": data.get("salary_text"),
+        "salary_min_vnd": data.get("salary_min_vnd"),
+        "salary_max_vnd": data.get("salary_max_vnd"),
+        "district": data.get("district"),
+        "job_type": data.get("job_type"),
+        "url": data.get("url"),
+        "source": data.get("source"),
+        "posted_time": data.get("posted_time"),
+        "created_at": data.get("created_at") or datetime.now().isoformat(),
+        "image_url": data.get("image_url"),
+        "phone": data.get("phone"),
+    }
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(sql, payload)
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def job_url_exists(url: str, db_path: Path = DB_PATH) -> bool:
+    """Kiểm tra nhanh xem URL việc làm đã tồn tại trong bảng jobs chưa."""
+    with get_connection(db_path) as conn:
+        row = conn.execute("SELECT 1 FROM jobs WHERE url = ? LIMIT 1", (url,)).fetchone()
+        return row is not None
+
+
+def get_jobs(
+    filters: Optional[Dict[str, Any]] = None,
+    db_path: Path = DB_PATH,
+) -> List[Dict[str, Any]]:
+    """Truy vấn danh sách việc làm Đà Nẵng từ bảng jobs theo bộ lọc."""
+    filters = filters or {}
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    districts = filters.get("districts")
+    district = filters.get("district")
+    if districts and isinstance(districts, list) and len(districts) > 0:
+        placeholders = ", ".join("?" for _ in districts)
+        conditions.append(f"district IN ({placeholders})")
+        params.extend(districts)
+    elif district and district.lower() != "tất cả":
+        conditions.append("district = ?")
+        params.append(district)
+
+    job_type = filters.get("job_type")
+    if job_type and job_type.lower() != "tất cả":
+        conditions.append("job_type = ?")
+        params.append(job_type)
+
+    sources = filters.get("sources")
+    if sources and isinstance(sources, list) and len(sources) > 0:
+        placeholders = ", ".join("?" for _ in sources)
+        conditions.append(f"source IN ({placeholders})")
+        params.extend(sources)
+
+    min_salary = filters.get("min_salary")
+    if min_salary is not None and int(min_salary) > 0:
+        conditions.append(
+            "((COALESCE(salary_max_vnd, salary_min_vnd) >= ?) OR (salary_min_vnd IS NULL AND salary_max_vnd IS NULL))"
+        )
+        params.append(int(min_salary))
+
+    if filters.get("has_phone"):
+        conditions.append("(phone IS NOT NULL AND length(trim(phone)) >= 9)")
+
+    if filters.get("has_image"):
+        conditions.append("(image_url IS NOT NULL AND length(trim(image_url)) > 5)")
+
+    keyword = filters.get("keyword") or filters.get("q")
+    if keyword:
+        conditions.append("(title LIKE ? OR company LIKE ? OR raw_content LIKE ?)")
+        search_term = f"%{keyword}%"
+        params.extend([search_term, search_term, search_term])
+
+    posted_after = filters.get("posted_after")
+    if posted_after:
+        conditions.append("posted_time >= ?")
+        params.append(str(posted_after))
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    sort_by = filters.get("sort_by", "newest")
+    if sort_by == "salary_desc":
+        order_clause = "ORDER BY CASE WHEN COALESCE(salary_max_vnd, salary_min_vnd) IS NULL THEN 1 ELSE 0 END, COALESCE(salary_max_vnd, salary_min_vnd) DESC, posted_time DESC"
+    else:
+        order_clause = "ORDER BY posted_time DESC, created_at DESC"
+
+    limit = int(filters.get("limit", 200))
+    offset = int(filters.get("offset", 0))
+
+    query = f"""
+    SELECT * FROM jobs
+    {where_clause}
+    {order_clause}
+    LIMIT ? OFFSET ?;
+    """
+    params.extend([limit, offset])
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 if __name__ == "__main__":

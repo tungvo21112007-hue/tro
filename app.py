@@ -26,12 +26,12 @@ try:
 except Exception:
     pass
 
-from database import get_rentals, init_db
+from database import get_jobs, get_rentals, init_db
 
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Phòng trọ Đà Nẵng – Danang Rental Aggregator",
-    page_icon="🏠",
+    page_title="Đà Nẵng Hub – Phòng trọ & Việc làm Đà Nẵng",
+    page_icon="🏙️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -81,6 +81,24 @@ SORT_OPTIONS = {
 }
 
 PLACEHOLDER_IMG = "https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?auto=format&fit=crop&w=500&q=80"
+PLACEHOLDER_JOB_IMG = "https://images.unsplash.com/photo-1486312338219-ce68d2c6f44d?auto=format&fit=crop&w=500&q=80"
+
+JOB_TYPES = [
+    "Tất cả",
+    "Văn phòng / Kinh doanh",
+    "Kỹ thuật / IT",
+    "Nhà hàng / Khách sạn / F&B",
+    "Lao động phổ thông / Kho",
+    "Bán thời gian / Thời vụ",
+    "Khác",
+]
+
+JOB_SOURCES = ["Việc Làm Tốt", "Vieclamdanang", "Danang43"]
+
+JOB_SORT_OPTIONS = {
+    "🕒 Mới nhất": "newest",
+    "💰 Lương: Cao → Thấp": "salary_desc",
+}
 
 
 # ── CSS Styling ──────────────────────────────────────────────────────
@@ -186,248 +204,391 @@ def _run_pipeline_manual():
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SIDEBAR — BỘ LỌC TÌM KIẾM
+#  SIDEBAR — CHỌN CHUYÊN MỤC & BỘ LỌC
 # ══════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.title("🔍 Bộ lọc phòng trọ")
-
-    # 1. Quận / Huyện
-    selected_districts = st.multiselect(
-        "📍 Quận / Huyện",
-        options=DANANG_DISTRICTS,
-        default=[],
-        placeholder="Tất cả quận",
-    )
-
-    # 2. Loại phòng
-    selected_room_type = st.selectbox(
-        "🏠 Loại phòng",
-        options=ROOM_TYPES,
-        index=0,
-    )
-
-    st.markdown("---")
-
-    # 3. Khoảng giá (Nút chọn nhanh + Slider đồng bộ)
-    st.markdown("**💰 Khoảng giá (VNĐ/tháng)**")
-
-    # Quản lý session state cho khoảng giá
-    if "price_preset" not in st.session_state:
-        st.session_state["price_preset"] = "Tất cả"
-
-    preset_choice = st.radio(
-        "Mức giá nhanh",
-        options=list(PRICE_PRESETS.keys()),
+    active_section = st.radio(
+        "📂 Chuyên mục",
+        options=["🏠 Phòng trọ", "💼 Việc làm Đà Nẵng"],
         horizontal=True,
-        label_visibility="collapsed",
-        key="radio_price_preset",
+        key="active_section",
     )
+    st.markdown("---")
 
-    preset_min, preset_max = PRICE_PRESETS[preset_choice]
+if active_section == "🏠 Phòng trọ":
+    with st.sidebar:
+        st.title("🔍 Bộ lọc phòng trọ")
 
-    price_range = st.slider(
-        "Tùy chỉnh khoảng giá",
-        min_value=500_000,
-        max_value=15_000_000,
-        value=(preset_min, preset_max),
-        step=100_000,
-        format="%d đ",
-    )
-    st.caption(f"Khoảng giá: **{_format_price(price_range[0])}**  →  **{_format_price(price_range[1])}**")
+        # 1. Quận / Huyện
+        selected_districts = st.multiselect(
+            "📍 Quận / Huyện",
+            options=DANANG_DISTRICTS,
+            default=[],
+            placeholder="Tất cả quận",
+        )
+
+        # 2. Loại phòng
+        selected_room_type = st.selectbox(
+            "🏠 Loại phòng",
+            options=ROOM_TYPES,
+            index=0,
+        )
+
+        st.markdown("---")
+
+        # 3. Khoảng giá (Nút chọn nhanh + Slider đồng bộ)
+        st.markdown("**💰 Khoảng giá (VNĐ/tháng)**")
+
+        if "price_preset" not in st.session_state:
+            st.session_state["price_preset"] = "Tất cả"
+
+        preset_choice = st.radio(
+            "Mức giá nhanh",
+            options=list(PRICE_PRESETS.keys()),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="radio_price_preset",
+        )
+
+        preset_min, preset_max = PRICE_PRESETS[preset_choice]
+
+        price_range = st.slider(
+            "Tùy chỉnh khoảng giá",
+            min_value=500_000,
+            max_value=15_000_000,
+            value=(preset_min, preset_max),
+            step=100_000,
+            format="%d đ",
+        )
+        st.caption(f"Khoảng giá: **{_format_price(price_range[0])}**  →  **{_format_price(price_range[1])}**")
+
+        st.markdown("---")
+
+        # 4. Diện tích (m²)
+        st.markdown("**📐 Diện tích (m²)**")
+        area_range = st.slider(
+            "Khoảng diện tích",
+            min_value=0,
+            max_value=100,
+            value=(0, 100),
+            step=5,
+            format="%d m²",
+            label_visibility="collapsed",
+        )
+        include_null_area = st.checkbox(
+            "Bao gồm tin chưa ghi diện tích",
+            value=True,
+            help="Nhiều chủ phòng không ghi diện tích trong tin đăng nhưng vẫn là tin hợp lệ.",
+        )
+
+        st.markdown("---")
+
+        # 5. Sắp xếp
+        sort_choice = st.selectbox(
+            "🔃 Sắp xếp theo",
+            options=list(SORT_OPTIONS.keys()),
+            index=0,
+        )
+
+        # 6. Thời gian đăng
+        time_label = st.selectbox(
+            "⏰ Thời gian đăng",
+            options=list(TIME_PRESETS.keys()),
+            index=3,
+        )
+
+        # 7. Nguồn tin
+        st.markdown("**🌐 Nguồn tin**")
+        source_checks = {}
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            source_checks["Facebook"] = st.checkbox("Facebook", value=True)
+        with col_s2:
+            source_checks["Phongtro123"] = st.checkbox("Phongtro123", value=True)
+        with col_s3:
+            source_checks["Chotot"] = st.checkbox("Chợ Tốt", value=True)
+
+        selected_sources = [s for s, checked in source_checks.items() if checked]
+
+        # 8. Tiêu chí bổ sung
+        st.markdown("**⭐ Tiêu chí bổ sung**")
+        has_phone_only = st.checkbox("Chỉ hiện tin có Số điện thoại", value=False)
+        has_image_only = st.checkbox("Chỉ hiện tin có Hình ảnh", value=False)
+
+        # 9. Tìm kiếm từ khóa
+        keyword = st.text_input("🔎 Tìm kiếm từ khóa", placeholder="VD: kiệt, full nội thất, gác lửng…")
+
+    # ── Truy vấn phòng trọ ──
+    filters: Dict[str, Any] = {
+        "min_price": price_range[0],
+        "max_price": price_range[1],
+        "min_area": area_range[0],
+        "max_area": area_range[1],
+        "include_null_area": include_null_area,
+        "has_phone": has_phone_only,
+        "has_image": has_image_only,
+        "sort_by": SORT_OPTIONS[sort_choice],
+        "limit": 200,
+    }
+
+    if selected_districts:
+        filters["districts"] = selected_districts
+    if selected_room_type and selected_room_type != "Tất cả":
+        filters["room_type"] = selected_room_type
+    if selected_sources and len(selected_sources) < len(SOURCE_OPTIONS):
+        filters["sources"] = selected_sources
+
+    time_delta = TIME_PRESETS[time_label]
+    if time_delta is not None:
+        filters["posted_after"] = (datetime.now() - time_delta).isoformat()
+    if keyword.strip():
+        filters["keyword"] = keyword.strip()
+
+    rows = get_rentals(filters)
+
+    # ── Khu vực chính Phòng trọ ──
+    col_title, col_action = st.columns([3, 1])
+    with col_title:
+        st.title("🏠 Phòng Trọ Đà Nẵng")
+        st.caption("Cập nhật tự động từ Facebook Groups, Phongtro123 & Chợ Tốt • Lọc sạch 0 tốn token AI")
+    with col_action:
+        if st.button("🔄 Quét tin mới ngay", width="stretch", type="primary"):
+            _run_pipeline_manual()
+            st.toast("Đang tiến hành cào tin mới từ các nguồn…", icon="⏳")
+            st.info("⏳ **Đang cào dữ liệu trong nền!**\n\nHãy theo dõi tab **Manage app** (Logs) hoặc đợi 1–2 phút rồi nhấn `F5` để tải lại dữ liệu mới nhất.")
+
+    fb_count = sum(1 for r in rows if (r.get("source") or "").lower() == "facebook")
+    pt_count = sum(1 for r in rows if "phongtro" in (r.get("source") or "").lower())
+    ct_count = sum(1 for r in rows if "chotot" in (r.get("source") or "").lower())
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric("Kết quả phù hợp", f"{len(rows)} phòng")
+        st.caption(f"🔵 Facebook: **{fb_count}** | 🟠 Phongtro123: **{pt_count}** | 🟢 Chợ Tốt: **{ct_count}**")
+    with col_m2:
+        with_phone_cnt = sum(1 for r in rows if r.get("phone"))
+        st.metric("Tin có số điện thoại", f"{with_phone_cnt} ({int(with_phone_cnt / max(1, len(rows)) * 100)}%)")
+    with col_m3:
+        with_img_cnt = sum(1 for r in rows if r.get("image_url"))
+        st.metric("Tin có hình ảnh", f"{with_img_cnt} ({int(with_img_cnt / max(1, len(rows)) * 100)}%)")
 
     st.markdown("---")
 
-    # 4. Diện tích (m²)
-    st.markdown("**📐 Diện tích (m²)**")
-    area_range = st.slider(
-        "Khoảng diện tích",
-        min_value=0,
-        max_value=100,
-        value=(0, 100),
-        step=5,
-        format="%d m²",
-        label_visibility="collapsed",
-    )
-    include_null_area = st.checkbox(
-        "Bao gồm tin chưa ghi diện tích",
-        value=True,
-        help="Nhiều chủ phòng không ghi diện tích trong tin đăng nhưng vẫn là tin hợp lệ.",
-    )
+    if not rows:
+        st.info("💡 Không tìm thấy phòng trọ nào phù hợp với bộ lọc hiện tại. Hãy thử nới rộng khoảng giá, diện tích hoặc bỏ bớt tiêu chí.")
+    else:
+        for item in rows:
+            title = item.get("title") or "Cho thuê phòng trọ Đà Nẵng"
+            price_str = _format_price(item.get("price_vnd"))
+            district_str = item.get("district") or "Đà Nẵng"
+            room_type_str = item.get("room_type") or "Phòng trọ"
+            time_str = _format_time(item.get("posted_time"))
+            source = item.get("source") or "Khác"
+            url = item.get("url") or "#"
+            phone = item.get("phone")
+            area_m2 = item.get("area_m2")
+            image_url = item.get("image_url") or PLACEHOLDER_IMG
+            content = item.get("raw_content") or ""
 
-    st.markdown("---")
+            source_badge_class = "badge-fb"
+            if "phongtro" in source.lower():
+                source_badge_class = "badge-pt"
+            elif "chotot" in source.lower():
+                source_badge_class = "badge-ct"
 
-    # 5. Sắp xếp
-    sort_choice = st.selectbox(
-        "🔃 Sắp xếp theo",
-        options=list(SORT_OPTIONS.keys()),
-        index=0,
-    )
+            with st.container(border=True):
+                col_img, col_info = st.columns([1, 2.5], gap="medium")
+                with col_img:
+                    st.image(image_url, width="stretch")
+                with col_info:
+                    badge_html = f"""
+                    <div>
+                        <span class="badge {source_badge_class}">🌐 {source}</span>
+                        <span class="badge badge-district">📍 {district_str}</span>
+                        <span class="badge badge-room">🏠 {room_type_str}</span>
+                        <span class="badge badge-district">⏰ {time_str}</span>
+                    </div>
+                    """
+                    st.markdown(badge_html, unsafe_allow_html=True)
+                    st.markdown(f"#### [{title}]({url})")
 
-    # 6. Thời gian đăng
-    time_label = st.selectbox(
-        "⏰ Thời gian đăng",
-        options=list(TIME_PRESETS.keys()),
-        index=3,
-    )
+                    area_display = f"• 📐 {area_m2} m²" if area_m2 else "• 📐 Chưa rõ diện tích"
+                    st.markdown(
+                        f"<p><span class='price-tag'>{price_str}</span> <span class='area-tag'>{area_display}</span></p>",
+                        unsafe_allow_html=True,
+                    )
 
-    # 7. Nguồn tin
-    st.markdown("**🌐 Nguồn tin**")
-    source_checks = {}
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        source_checks["Facebook"] = st.checkbox("Facebook", value=True)
-    with col_s2:
-        source_checks["Phongtro123"] = st.checkbox("Phongtro123", value=True)
-    with col_s3:
-        source_checks["Chotot"] = st.checkbox("Chợ Tốt", value=True)
+                    c_phone, c_btn = st.columns([1.5, 1])
+                    with c_phone:
+                        if phone:
+                            st.markdown(f"**📞 SĐT liên hệ:** ` {phone} `")
+                        else:
+                            st.caption("📞 SĐT: *Xem trong bài đăng gốc*")
+                    with c_btn:
+                        st.link_button("🔗 Xem bài gốc", url, width="stretch")
 
-    selected_sources = [s for s, checked in source_checks.items() if checked]
+                    if content:
+                        summary = content[:180] + ("…" if len(content) > 180 else "")
+                        with st.expander("📄 Xem tóm tắt nội dung bài viết"):
+                            st.write(content)
+                        st.caption(summary)
 
-    # 8. Tiêu chí bổ sung
-    st.markdown("**⭐ Tiêu chí bổ sung**")
-    has_phone_only = st.checkbox("Chỉ hiện tin có Số điện thoại", value=False)
-    has_image_only = st.checkbox("Chỉ hiện tin có Hình ảnh", value=False)
-
-    # 9. Tìm kiếm từ khóa
-    keyword = st.text_input("🔎 Tìm kiếm từ khóa", placeholder="VD: kiệt, full nội thất, gác lửng…")
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  TRUY VẤN DỮ LIỆU
-# ══════════════════════════════════════════════════════════════════════
-filters: Dict[str, Any] = {
-    "min_price": price_range[0],
-    "max_price": price_range[1],
-    "min_area": area_range[0],
-    "max_area": area_range[1],
-    "include_null_area": include_null_area,
-    "has_phone": has_phone_only,
-    "has_image": has_image_only,
-    "sort_by": SORT_OPTIONS[sort_choice],
-    "limit": 200,
-}
-
-if selected_districts:
-    filters["districts"] = selected_districts
-
-if selected_room_type and selected_room_type != "Tất cả":
-    filters["room_type"] = selected_room_type
-
-if selected_sources and len(selected_sources) < len(SOURCE_OPTIONS):
-    filters["sources"] = selected_sources
-
-time_delta = TIME_PRESETS[time_label]
-if time_delta is not None:
-    filters["posted_after"] = (datetime.now() - time_delta).isoformat()
-
-if keyword.strip():
-    filters["keyword"] = keyword.strip()
-
-rows = get_rentals(filters)
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  KHU VỰC CHÍNH (MAIN DASHBOARD)
-# ══════════════════════════════════════════════════════════════════════
-col_title, col_action = st.columns([3, 1])
-
-with col_title:
-    st.title("🏠 Phòng Trọ Đà Nẵng")
-    st.caption("Cập nhật tự động từ Facebook Groups, Phongtro123 & Chợ Tốt • Lọc sạch 0 tốn token AI")
-
-with col_action:
-    if st.button("🔄 Quét tin mới ngay", width="stretch", type="primary"):
-        _run_pipeline_manual()
-        st.toast("Đang tiến hành cào tin mới từ các nguồn…", icon="⏳")
-        st.info("⏳ **Đang cào dữ liệu trong nền!**\n\nHãy theo dõi tab **Manage app** (Logs) hoặc đợi 1–2 phút rồi nhấn `F5` để tải lại dữ liệu mới nhất.")
-
-# Thanh thống kê
-fb_count = sum(1 for r in rows if (r.get("source") or "").lower() == "facebook")
-pt_count = sum(1 for r in rows if "phongtro" in (r.get("source") or "").lower())
-ct_count = sum(1 for r in rows if "chotot" in (r.get("source") or "").lower())
-
-col_m1, col_m2, col_m3 = st.columns(3)
-with col_m1:
-    st.metric("Kết quả phù hợp", f"{len(rows)} phòng")
-    st.caption(f"🔵 Facebook: **{fb_count}** | 🟠 Phongtro123: **{pt_count}** | 🟢 Chợ Tốt: **{ct_count}**")
-with col_m2:
-    with_phone_cnt = sum(1 for r in rows if r.get("phone"))
-    st.metric("Tin có số điện thoại", f"{with_phone_cnt} ({int(with_phone_cnt / max(1, len(rows)) * 100)}%)")
-with col_m3:
-    with_img_cnt = sum(1 for r in rows if r.get("image_url"))
-    st.metric("Tin có hình ảnh", f"{with_img_cnt} ({int(with_img_cnt / max(1, len(rows)) * 100)}%)")
-
-st.markdown("---")
-
-# ── Hiển thị danh sách thẻ phòng trọ ──────────────────────────────────
-if not rows:
-    st.info("💡 Không tìm thấy phòng trọ nào phù hợp với bộ lọc hiện tại. Hãy thử nới rộng khoảng giá, diện tích hoặc bỏ bớt tiêu chí.")
 else:
-    for item in rows:
-        title = item.get("title") or "Cho thuê phòng trọ Đà Nẵng"
-        price_str = _format_price(item.get("price_vnd"))
-        district_str = item.get("district") or "Đà Nẵng"
-        room_type_str = item.get("room_type") or "Phòng trọ"
-        time_str = _format_time(item.get("posted_time"))
-        source = item.get("source") or "Khác"
-        url = item.get("url") or "#"
-        phone = item.get("phone")
-        area_m2 = item.get("area_m2")
-        image_url = item.get("image_url") or PLACEHOLDER_IMG
-        content = item.get("raw_content") or ""
+    with st.sidebar:
+        st.title("🔍 Bộ lọc việc làm")
 
-        # Xác định class badge nguồn
-        source_badge_class = "badge-fb"
-        if "phongtro" in source.lower():
-            source_badge_class = "badge-pt"
-        elif "chotot" in source.lower():
+        job_districts = st.multiselect(
+            "📍 Quận / Khu vực",
+            options=DANANG_DISTRICTS,
+            default=[],
+            placeholder="Tất cả khu vực",
+            key="job_districts",
+        )
+        selected_job_type = st.selectbox(
+            "💼 Ngành nghề",
+            options=JOB_TYPES,
+            index=0,
+            key="job_type",
+        )
+        min_salary_tr = st.slider(
+            "💰 Mức lương tối thiểu (triệu/tháng)",
+            min_value=0,
+            max_value=30,
+            value=0,
+            step=1,
+            format="%d triệu",
+            key="job_min_salary",
+        )
+        st.caption("Hiển thị cả các tin ghi *Thỏa thuận*.")
+
+        job_sort_choice = st.selectbox(
+            "🔃 Sắp xếp theo",
+            options=list(JOB_SORT_OPTIONS.keys()),
+            index=0,
+            key="job_sort",
+        )
+        job_time_label = st.selectbox(
+            "⏰ Thời gian đăng",
+            options=list(TIME_PRESETS.keys()),
+            index=3,
+            key="job_time",
+        )
+
+        st.markdown("**🌐 Nguồn tin**")
+        job_source_checks = {}
+        for src in JOB_SOURCES:
+            job_source_checks[src] = st.checkbox(src, value=True, key=f"job_src_{src}")
+        selected_job_sources = [s for s, checked in job_source_checks.items() if checked]
+
+        job_phone_only = st.checkbox("Chỉ hiện tin có Số điện thoại", value=False, key="job_phone_only")
+        job_keyword = st.text_input(
+            "🔎 Tìm kiếm từ khóa",
+            placeholder="VD: kế toán, phục vụ, IT, bán thời gian…",
+            key="job_keyword",
+        )
+
+    job_filters: Dict[str, Any] = {
+        "min_salary": min_salary_tr * 1_000_000,
+        "has_phone": job_phone_only,
+        "sort_by": JOB_SORT_OPTIONS[job_sort_choice],
+        "limit": 200,
+    }
+    if job_districts:
+        job_filters["districts"] = job_districts
+    if selected_job_type and selected_job_type != "Tất cả":
+        job_filters["job_type"] = selected_job_type
+    if selected_job_sources and len(selected_job_sources) < len(JOB_SOURCES):
+        job_filters["sources"] = selected_job_sources
+
+    job_delta = TIME_PRESETS[job_time_label]
+    if job_delta is not None:
+        job_filters["posted_after"] = (datetime.now() - job_delta).isoformat()
+    if job_keyword.strip():
+        job_filters["keyword"] = job_keyword.strip()
+
+    jobs = get_jobs(job_filters)
+
+    col_title, col_action = st.columns([3, 1])
+    with col_title:
+        st.title("💼 Việc Làm Đà Nẵng")
+        st.caption("Tổng hợp tự động từ Việc Làm Tốt (Chợ Tốt), Vieclamdanang.vn & Danang43.vn • 0 tốn token AI")
+    with col_action:
+        if st.button("🔄 Quét tin mới ngay", width="stretch", type="primary", key="btn_scan_jobs"):
+            _run_pipeline_manual()
+            st.toast("Đang tiến hành cào tin phòng trọ & việc làm mới…", icon="⏳")
+            st.info("⏳ **Đang cào dữ liệu trong nền!**\n\nĐợi 30–60 giây rồi nhấn `F5` để tải lại danh sách việc làm mới nhất.")
+
+    vlt_cnt = sum(1 for j in jobs if j.get("source") == "Việc Làm Tốt")
+    vldn_cnt = sum(1 for j in jobs if j.get("source") == "Vieclamdanang")
+    dn43_cnt = sum(1 for j in jobs if j.get("source") == "Danang43")
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric("Tin tuyển dụng phù hợp", f"{len(jobs)} việc làm")
+        st.caption(f"🟢 Việc Làm Tốt: **{vlt_cnt}** | 🔵 Vieclamdanang: **{vldn_cnt}** | 🟠 Danang43: **{dn43_cnt}**")
+    with col_m2:
+        has_sal_cnt = sum(1 for j in jobs if j.get("salary_min_vnd") or j.get("salary_max_vnd"))
+        st.metric("Tin ghi rõ mức lương", f"{has_sal_cnt} ({int(has_sal_cnt / max(1, len(jobs)) * 100)}%)")
+    with col_m3:
+        job_phone_cnt = sum(1 for j in jobs if j.get("phone"))
+        st.metric("Tin có số điện thoại", f"{job_phone_cnt} ({int(job_phone_cnt / max(1, len(jobs)) * 100)}%)")
+
+    st.markdown("---")
+
+    if not jobs:
+        st.info("💡 Chưa có tin việc làm phù hợp với bộ lọc (hoặc chưa chạy quét dữ liệu lần đầu). Nhấn **🔄 Quét tin mới ngay** ở góc phải để thu thập ngay!")
+    else:
+        for job in jobs:
+            title = job.get("title") or "Tin tuyển dụng Đà Nẵng"
+            company = job.get("company") or "Doanh nghiệp Đà Nẵng"
+            salary_text = job.get("salary_text") or "Thỏa thuận"
+            district_str = job.get("district") or "Đà Nẵng"
+            job_type_str = job.get("job_type") or "Khác"
+            time_str = _format_time(job.get("posted_time"))
+            source = job.get("source") or "Khác"
+            url = job.get("url") or "#"
+            phone = job.get("phone")
+            image_url = job.get("image_url") or PLACEHOLDER_JOB_IMG
+            content = job.get("raw_content") or ""
+
             source_badge_class = "badge-ct"
+            if source == "Vieclamdanang":
+                source_badge_class = "badge-fb"
+            elif source == "Danang43":
+                source_badge_class = "badge-pt"
 
-        # Hiển thị dạng Card 2 cột
-        with st.container(border=True):
-            col_img, col_info = st.columns([1, 2.5], gap="medium")
+            with st.container(border=True):
+                col_img, col_info = st.columns([1, 2.5], gap="medium")
+                with col_img:
+                    st.image(image_url, width="stretch")
+                with col_info:
+                    badge_html = f"""
+                    <div>
+                        <span class="badge {source_badge_class}">🌐 {source}</span>
+                        <span class="badge badge-district">📍 {district_str}</span>
+                        <span class="badge badge-room">💼 {job_type_str}</span>
+                        <span class="badge badge-district">⏰ {time_str}</span>
+                    </div>
+                    """
+                    st.markdown(badge_html, unsafe_allow_html=True)
+                    st.markdown(f"#### [{title}]({url})")
+                    st.markdown(f"🏢 **Đơn vị tuyển dụng:** {company}")
+                    st.markdown(
+                        f"<p><span class='price-tag'>💵 {salary_text}</span></p>",
+                        unsafe_allow_html=True,
+                    )
 
-            # Cột trái: Ảnh đại diện
-            with col_img:
-                st.image(image_url, width="stretch")
+                    c_phone, c_btn = st.columns([1.5, 1])
+                    with c_phone:
+                        if phone:
+                            st.markdown(f"**📞 SĐT liên hệ:** ` {phone} `")
+                        else:
+                            st.caption("📞 SĐT / Ứng tuyển: *Xem chi tiết tại trang gốc*")
+                    with c_btn:
+                        st.link_button("🔗 Ứng tuyển / Xem gốc", url, width="stretch")
 
-            # Cột phải: Thông tin chi tiết
-            with col_info:
-                # Dòng Badges
-                badge_html = f"""
-                <div>
-                    <span class="badge {source_badge_class}">🌐 {source}</span>
-                    <span class="badge badge-district">📍 {district_str}</span>
-                    <span class="badge badge-room">🏠 {room_type_str}</span>
-                    <span class="badge badge-district">⏰ {time_str}</span>
-                </div>
-                """
-                st.markdown(badge_html, unsafe_allow_html=True)
-
-                # Tiêu đề
-                st.markdown(f"#### [{title}]({url})")
-
-                # Giá tiền & Diện tích
-                area_display = f"• 📐 {area_m2} m²" if area_m2 else "• 📐 Chưa rõ diện tích"
-                st.markdown(
-                    f"<p><span class='price-tag'>{price_str}</span> <span class='area-tag'>{area_display}</span></p>",
-                    unsafe_allow_html=True,
-                )
-
-                # Số điện thoại & Thao tác
-                c_phone, c_btn = st.columns([1.5, 1])
-                with c_phone:
-                    if phone:
-                        st.markdown(f"**📞 SĐT liên hệ:** ` {phone} `")
-                    else:
-                        st.caption("📞 SĐT: *Xem trong bài đăng gốc*")
-
-                with c_btn:
-                    st.link_button("🔗 Xem bài gốc", url, width="stretch")
-
-                # Nội dung rút gọn có thể mở rộng
-                if content:
-                    summary = content[:180] + ("…" if len(content) > 180 else "")
-                    with st.expander("📄 Xem tóm tắt nội dung bài viết"):
-                        st.write(content)
-                    st.caption(summary)
+                    if content and content != title:
+                        summary = content[:180] + ("…" if len(content) > 180 else "")
+                        with st.expander("📄 Xem mô tả công việc"):
+                            st.write(content)
+                        st.caption(summary)

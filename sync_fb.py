@@ -56,30 +56,70 @@ def check_fb_session() -> bool:
     try:
         from playwright.sync_api import sync_playwright
 
+        user_agent = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
+        viewport = {"width": 1280, "height": 900}
+
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            ctx = browser.new_context(
-                locale="vi-VN",
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            )
+            is_persistent = False
+            browser = None
+            ctx = None
+
+            if PROFILE_DIR.exists():
+                try:
+                    ctx = p.chromium.launch_persistent_context(
+                        str(PROFILE_DIR),
+                        headless=True,
+                        locale="vi-VN",
+                        user_agent=user_agent,
+                        viewport=viewport,
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-notifications",
+                        ],
+                    )
+                    is_persistent = True
+                except Exception:
+                    pass
+
+            if ctx is None:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-notifications",
+                    ],
+                )
+                ctx = browser.new_context(
+                    locale="vi-VN",
+                    user_agent=user_agent,
+                    viewport=viewport,
+                )
+
             if cookies:
-                ctx.add_cookies(cookies)
+                try:
+                    ctx.add_cookies(cookies)
+                except Exception:
+                    pass
 
             page = ctx.new_page()
-            # Thử truy cập Facebook home hoặc group đầu tiên
             test_url = DEFAULT_FB_GROUPS[0]
-            page.goto(test_url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
+            page.goto(test_url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2500)
 
             current_url = page.url.lower()
-            browser.close()
+
+            if is_persistent:
+                ctx.close()
+            else:
+                if browser:
+                    browser.close()
 
             if "login" in current_url or "checkpoint" in current_url:
                 log.warning("Session Facebook đã hết hạn (chuyển hướng về: %s)", current_url)
@@ -88,6 +128,8 @@ def check_fb_session() -> bool:
             log.info("✅ Session Facebook còn hiệu lực tốt!")
             return True
     except Exception as e:
+        log.warning("Lỗi trong quá trình kiểm tra session: %s. Tiếp tục thử cào trực tiếp.", e)
+        return True
         log.warning("Lỗi trong quá trình kiểm tra session: %s. Tiếp tục thử cào trực tiếp.", e)
         return True
 

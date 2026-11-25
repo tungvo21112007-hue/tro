@@ -4,6 +4,7 @@ Hỗ trợ quản lý session & lưu trữ cookie đa môi trường (Local & St
 Kỹ thuật cuộn trang đa tầng, chống chặn, và bóc tách bài viết thông minh.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -202,16 +203,28 @@ def _extract_post_image(item) -> Optional[str]:
     return None
 
 
+def _format_group_url(url: str) -> str:
+    """Đảm bảo URL group luôn có tham số sorting_setting=CHRONOLOGICAL để lấy bài mới nhất."""
+    clean = url.strip()
+    if "?" in clean:
+        if "sorting_setting=" not in clean:
+            clean += "&sorting_setting=CHRONOLOGICAL"
+    else:
+        clean = clean.rstrip("/") + "?sorting_setting=CHRONOLOGICAL"
+    return clean
+
+
 def _extract_posts(page, group_url: str, limit: int = DEFAULT_RESULTS_LIMIT, max_scrolls: int = 8) -> List[Dict[str, Any]]:
     """
-    Cuộn trang 6–8 lần, tự động click 'Xem thêm', trích xuất bài đăng và lọc trùng link.
-    Delay ngẫu nhiên giữa các lần cuộn để mô phỏng hành vi người dùng thật.
+    Cuộn trang nhiều lần, tự động click 'Xem thêm', trích xuất bài đăng từ feed container.
+    Không bao giờ bị trượt bài kể cả khi Facebook giấu thẻ permalink /posts/.
     """
     posts: Dict[str, Dict[str, Any]] = {}
     group_slug = _extract_group_slug(group_url)
+    clean_group_base = group_url.split("?")[0].rstrip("/")
 
     for scroll_idx in range(max_scrolls):
-        # Bấm các nút "Xem thêm" / "See more" để bung nội dung bài viết
+        # 1. Bấm tất cả các nút 'Xem thêm' / 'See more' để bung trọn vẹn văn bản
         try:
             more_buttons = page.locator(
                 "div[role='button']:has-text('Xem thêm'), "
@@ -219,15 +232,15 @@ def _extract_posts(page, group_url: str, limit: int = DEFAULT_RESULTS_LIMIT, max
                 "div[role='button']:has-text('See more'), "
                 "span:has-text('See more')"
             ).all()
-            for btn in more_buttons[:8]:
+            for btn in more_buttons[:10]:
                 try:
-                    btn.click(timeout=300)
+                    btn.click(timeout=250)
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # Quét các thẻ bài viết (role='article', role='feed' > div, container chứa message)
+        # 2. Quét các thẻ bài viết trong feed container
         try:
             items = page.locator("div[role='feed'] > div, div[role='article']").all()
         except Exception:
@@ -235,12 +248,18 @@ def _extract_posts(page, group_url: str, limit: int = DEFAULT_RESULTS_LIMIT, max
 
         for item in items:
             try:
-                post_url = _extract_post_url(item, group_slug)
-                if not post_url or post_url in posts:
+                text = _extract_post_text(item)
+                if not text or len(text) < 25:
                     continue
 
-                text = _extract_post_text(item)
-                if not text or len(text) < 20:
+                # 3. Lấy post_url permalink nếu có, nếu chưa lộ thì tạo hash duy nhất từ text đầu
+                post_url = _extract_post_url(item, group_slug)
+                if not post_url:
+                    text_seed = text[:120].strip()
+                    post_hash = hashlib.md5(text_seed.encode("utf-8")).hexdigest()[:12]
+                    post_url = f"{clean_group_base}#post-{post_hash}"
+
+                if post_url in posts:
                     continue
 
                 title = text.split("\n")[0][:60].strip() or text[:60].strip()
@@ -260,10 +279,10 @@ def _extract_posts(page, group_url: str, limit: int = DEFAULT_RESULTS_LIMIT, max
         if len(posts) >= limit:
             break
 
-        # Cuộn trang xuống kèm delay ngẫu nhiên 1.5s - 3s
-        scroll_y = random.randint(2500, 3500)
+        # Cuộn trang xuống kèm delay ngẫu nhiên 1.5s - 2.5s
+        scroll_y = random.randint(2200, 3200)
         page.mouse.wheel(0, scroll_y)
-        wait_time = random.uniform(1.5, 3.0)
+        wait_time = random.uniform(1.5, 2.5)
         page.wait_for_timeout(int(wait_time * 1000))
 
     return list(posts.values())[:limit]
@@ -293,51 +312,91 @@ def crawl_fb_groups(
         log.warning("Thư viện playwright chưa được cài đặt: %s. Bỏ qua cào Facebook.", e)
         return []
 
-    urls = group_urls or [
-        u.strip() for u in os.getenv("FB_GROUP_URLS", "").split(",") if u.strip()
-    ] or DEFAULT_FB_GROUPS
+    urls = [
+        _format_group_url(u)
+        for u in (
+            group_urls
+            or [u.strip() for u in os.getenv("FB_GROUP_URLS", "").split(",") if u.strip()]
+            or DEFAULT_FB_GROUPS
+        )
+    ]
 
     cookies = get_persisted_cookies()
     results: List[Dict[str, Any]] = []
 
+    user_agent = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+    viewport = {"width": 1280, "height": 900}
+
     try:
         with sync_playwright() as p:
+            is_persistent = False
             browser = None
-            try:
-                browser = p.chromium.launch(
-                    headless=headless,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-notifications",
-                        "--disable-geolocation",
-                    ],
+            ctx = None
+
+            # 1. Ưu tiên launch_persistent_context với thư mục fb_profile/ nếu tồn tại trên local
+            if PROFILE_DIR.exists() and not (is_github_actions or is_linux_cloud):
+                try:
+                    ctx = p.chromium.launch_persistent_context(
+                        str(PROFILE_DIR),
+                        headless=headless,
+                        locale="vi-VN",
+                        user_agent=user_agent,
+                        viewport=viewport,
+                        timezone_id="Asia/Ho_Chi_Minh",
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-notifications",
+                            "--disable-geolocation",
+                        ],
+                    )
+                    is_persistent = True
+                    log.info("Khởi chạy Chromium bằng persistent context từ %s", PROFILE_DIR.name)
+                except Exception as e:
+                    log.warning("Không thể mở persistent context từ %s (%s). Thử khởi chạy browser thường.", PROFILE_DIR.name, e)
+
+            # 2. Khởi chạy browser thường nếu chưa mở context
+            if ctx is None:
+                try:
+                    browser = p.chromium.launch(
+                        headless=headless,
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-notifications",
+                            "--disable-geolocation",
+                        ],
+                    )
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "executable" in err_msg or "install" in err_msg:
+                        log.info("Chưa có browser binary trên Cloud, đang chạy 'playwright install chromium'...")
+                        try:
+                            import subprocess
+                            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True, timeout=120)
+                            browser = p.chromium.launch(
+                                headless=headless,
+                                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                            )
+                        except Exception as err:
+                            log.warning("Không thể tự động cài Playwright Chromium: %s", err)
+
+                    if browser is None:
+                        log.warning("Chromium không thể khởi chạy trên môi trường hiện tại: %s", e)
+                        return []
+
+                ctx = browser.new_context(
+                    locale="vi-VN",
+                    user_agent=user_agent,
+                    viewport=viewport,
+                    timezone_id="Asia/Ho_Chi_Minh",
                 )
-            except Exception as e:
-                err_msg = str(e).lower()
-                if "executable" in err_msg or "install" in err_msg:
-                    log.info("Chưa có browser binary trên Cloud, đang chạy 'playwright install chromium'...")
-                    try:
-                        import subprocess
-                        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True, timeout=120)
-                        browser = p.chromium.launch(
-                            headless=headless,
-                            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                        )
-                    except Exception as err:
-                        log.warning("Không thể tự động cài Playwright Chromium: %s", err)
 
-                if browser is None:
-                    log.warning("Chromium không thể khởi chạy trên môi trường hiện tại: %s", e)
-                    return []
-
-            ctx = browser.new_context(
-                locale="vi-VN",
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
-                timezone_id="Asia/Ho_Chi_Minh",
-            )
             ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
             # Nạp cookies nếu có
@@ -374,15 +433,19 @@ def crawl_fb_groups(
 
                     body_snippet = page.locator("body").inner_text()
                     if "Tham gia nhóm" in body_snippet or "Join group" in body_snippet:
-                        log.info("  ℹ️ Nhóm yêu cầu quyền thành viên (Tham gia nhóm). Đang kiểm tra bài viết công khai...")
+                        log.info("  ℹ️ Nhóm công khai (chưa tham gia). Đang trích xuất bài viết...")
 
-                    items = _extract_posts(page, group_url=url, limit=results_limit, max_scrolls=8)
+                    items = _extract_posts(page, group_url=url, limit=results_limit, max_scrolls=6)
                     log.info("  → Thu thập được %d bài viết từ %s", len(items), url)
                     results.extend(items)
                 except Exception as e:
                     log.error("Lỗi khi cào %s: %s", url, e)
 
-            browser.close()
+            if is_persistent:
+                ctx.close()
+            else:
+                if browser:
+                    browser.close()
     except Exception as e:
         log.error("Lỗi Playwright trong fb_crawler: %s", e)
         return []
