@@ -2,12 +2,13 @@
 job_crawler.py – Thu thập và bóc tách dữ liệu việc làm tại Đà Nẵng (0 tốn token AI).
 Nguồn dữ liệu:
   1. Việc Làm Tốt / Chợ Tốt Việc Làm (JSON API gateway.chotot.com, region_v2=3017, cg=13010)
-  2. Vieclamdanang.vn (HTML trang chủ việc làm Đà Nẵng)
-  3. Danang43.vn (HTML chuyên mục việc làm Đà Nẵng)
+  2. Vieclamdanang.vn (HTML trang chủ + trang chi tiết song song)
+  3. Danang43.vn (HTML chuyên mục việc làm + trang chi tiết song song)
 """
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -60,7 +61,7 @@ def classify_job_type(title: str, content: str = "") -> str:
 def parse_salary_range(text: str) -> Tuple[Optional[int], Optional[int], str]:
     """
     Bóc tách mức lương từ chuỗi tiếng Việt sang (min_vnd, max_vnd, salary_text).
-    Hỗ trợ: "10 - 15 triệu", "8tr", "8.5 triệu", "Thỏa thuận", "25k/giờ".
+    Nếu không tìm thấy mẫu lương rõ ràng thì luôn trả về "Thỏa thuận" (không trả về đoạn văn dài).
     """
     if not text:
         return None, None, "Thỏa thuận"
@@ -68,7 +69,7 @@ def parse_salary_range(text: str) -> Tuple[Optional[int], Optional[int], str]:
     clean = " ".join(text.split())
     lower = clean.lower()
 
-    if any(w in lower for w in ("thỏa thuận", "thương lượng", "cạnh tranh")):
+    if len(clean) <= 35 and any(w in lower for w in ("thỏa thuận", "thương lượng", "cạnh tranh")):
         return None, None, "Thỏa thuận"
 
     # Dạng khoảng: "10 - 15 triệu" hoặc "10-15tr"
@@ -79,21 +80,63 @@ def parse_salary_range(text: str) -> Tuple[Optional[int], Optional[int], str]:
     if m_range:
         v1 = int(float(m_range.group(1).replace(",", ".")) * 1_000_000)
         v2 = int(float(m_range.group(2).replace(",", ".")) * 1_000_000)
-        return min(v1, v2), max(v1, v2), clean
+        s_min, s_max = min(v1, v2), max(v1, v2)
+        fmt = f"{m_range.group(1)} - {m_range.group(2)} triệu/tháng"
+        return s_min, s_max, fmt
 
-    # Dạng một mức: "từ 8 triệu", "8.5 triệu", "12tr"
-    m_single = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:triệu|trieu|tr)\b", lower)
+    # Dạng một mức: "đến 10 triệu", "từ 8 triệu", "8.5 triệu", "12tr"
+    m_single = re.search(
+        r"(?:(từ|đến|tới)\s*)?(\d+(?:[.,]\d+)?)\s*(?:triệu|trieu|tr)\b",
+        lower,
+    )
     if m_single:
-        v = int(float(m_single.group(1).replace(",", ".")) * 1_000_000)
-        return v, v, clean
+        v = int(float(m_single.group(2).replace(",", ".")) * 1_000_000)
+        prefix = f"{m_single.group(1).capitalize()} " if m_single.group(1) else ""
+        return v, v, f"{prefix}{m_single.group(2)} triệu/tháng"
 
-    # Dạng số VND đầy đủ (ví dụ "8.000.000 đ")
+    # Dạng lương giờ: "25k/giờ", "30.000đ/h"
+    m_hour = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:k|nghìn|ngàn)\s*/\s*(?:h|giờ|buổi|ca)", lower)
+    if m_hour:
+        return None, None, m_hour.group(0)
+
+    # Dạng số VND đầy đủ (vd "8.000.000 đ")
     m_full = re.search(r"(\d{1,2})[.,](\d{3})[.,]000", lower)
     if m_full:
         v = int(m_full.group(1) + m_full.group(2) + "000")
-        return v, v, clean
+        return v, v, f"{v // 1_000_000} triệu/tháng"
 
-    return None, None, clean
+    return None, None, "Thỏa thuận"
+
+
+def _enrich_chotot_detail(job: Dict[str, Any], list_id: Any) -> Dict[str, Any]:
+    """Lấy thêm địa chỉ, hình thức làm việc, kinh nghiệm, số lượng từ API chi tiết Chợ Tốt."""
+    try:
+        resp = requests.get(
+            f"https://gateway.chotot.com/v1/public/ad-listing/{list_id}",
+            headers=HEADERS,
+            timeout=10,
+        )
+        if not resp.ok:
+            return job
+        data = resp.json()
+        for p in data.get("parameters", []):
+            label = (p.get("label") or "").lower()
+            val = (p.get("value") or "").strip()
+            if not val:
+                continue
+            if "địa chỉ" in label:
+                job["address"] = val
+            elif "loại công việc" in label:
+                job["work_type"] = val
+            elif "kinh nghiệm" in label:
+                job["experience"] = val
+            elif "số lượng" in label:
+                job["quantity"] = val
+            elif "tên công ty" in label and job.get("company") in ("Nhà tuyển dụng", "."):
+                job["company"] = val
+    except Exception:
+        pass
+    return job
 
 
 def crawl_chotot_jobs(limit: int = 40) -> List[Dict[str, Any]]:
@@ -102,7 +145,7 @@ def crawl_chotot_jobs(limit: int = 40) -> List[Dict[str, Any]]:
         f"https://gateway.chotot.com/v1/public/ad-listing"
         f"?region_v2=3017&cg=13010&limit={limit}&st=s,k"
     )
-    results: List[Dict[str, Any]] = []
+    results: List[Tuple[Dict[str, Any], Any]] = []
     try:
         resp = requests.get(api_url, headers=HEADERS, timeout=TIMEOUT)
         resp.raise_for_status()
@@ -120,6 +163,8 @@ def crawl_chotot_jobs(limit: int = 40) -> List[Dict[str, Any]]:
 
             body = (ad.get("body") or "").strip()
             company = (ad.get("company_name") or ad.get("account_name") or "Nhà tuyển dụng").strip()
+            if company == ".":
+                company = "Nhà tuyển dụng"
             price_val = ad.get("price")
             price_str = (ad.get("price_string") or "").strip()
 
@@ -143,34 +188,91 @@ def crawl_chotot_jobs(limit: int = 40) -> List[Dict[str, Any]]:
             if not image_url and isinstance(ad.get("images"), list) and ad["images"]:
                 image_url = ad["images"][0]
 
-            results.append(
-                {
-                    "title": subject,
-                    "company": company,
-                    "raw_content": body or subject,
-                    "salary_text": sal_text,
-                    "salary_min_vnd": sal_min,
-                    "salary_max_vnd": sal_max,
-                    "district": district,
-                    "job_type": classify_job_type(subject, body),
-                    "url": f"https://www.vieclamtot.com/{list_id}.htm",
-                    "source": "Việc Làm Tốt",
-                    "posted_time": posted_time,
-                    "image_url": image_url,
-                    "phone": extract_phone(body),
-                }
-            )
+            job = {
+                "title": subject,
+                "company": company,
+                "raw_content": body or subject,
+                "salary_text": sal_text,
+                "salary_min_vnd": sal_min,
+                "salary_max_vnd": sal_max,
+                "district": district,
+                "job_type": classify_job_type(subject, body),
+                "url": f"https://www.vieclamtot.com/{list_id}.htm",
+                "source": "Việc Làm Tốt",
+                "posted_time": posted_time,
+                "image_url": image_url,
+                "phone": extract_phone(body),
+                "address": area_raw or None,
+                "work_type": None,
+                "experience": None,
+                "deadline": None,
+                "quantity": None,
+            }
+            results.append((job, list_id))
         except Exception:
             continue
 
-    log.info("Việc Làm Tốt (Chợ Tốt): thu được %d tin tuyển dụng.", len(results))
-    return results
+    enriched: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_enrich_chotot_detail, j, lid) for j, lid in results]
+        for fut in as_completed(futures):
+            enriched.append(fut.result())
+
+    log.info("Việc Làm Tốt (Chợ Tốt): thu được %d tin tuyển dụng.", len(enriched))
+    return enriched
+
+
+def _enrich_vieclamdanang_detail(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Lấy chi tiết quận, kinh nghiệm, số lượng, hình thức làm việc, mô tả từ vieclamdanang.vn."""
+    try:
+        resp = requests.get(job["url"], headers=HEADERS, timeout=10)
+        if not resp.ok:
+            return job
+        soup = BeautifulSoup(resp.text, "html.parser")
+        lines = [l.strip() for l in soup.get_text("\n").splitlines() if l.strip()]
+        full_text = "\n".join(lines)
+
+        def _after(label: str) -> Optional[str]:
+            for i, line in enumerate(lines):
+                if line.rstrip(":").lower() == label.lower() and i + 1 < len(lines):
+                    return lines[i + 1]
+            return None
+
+        loc = _after("Địa điểm tuyển dụng")
+        if loc:
+            job["address"] = loc
+            dist = normalize_district(loc)
+            if dist:
+                job["district"] = dist
+
+        sal = _after("Mức lương")
+        if sal:
+            s_min, s_max, s_txt = parse_salary_range(sal)
+            if s_txt != "Thỏa thuận":
+                job["salary_min_vnd"], job["salary_max_vnd"], job["salary_text"] = s_min, s_max, s_txt
+
+        job["experience"] = _after("Kinh nghiệm")
+        job["work_type"] = _after("Hình thức làm việc")
+        job["deadline"] = _after("Hạn nộp hồ sơ")
+        job["quantity"] = _after("Số lượng cần tuyển")
+
+        # Trích mô tả công việc sạch
+        m_desc = re.search(r"Mô tả công việc\s*(.*?)(?:Quyền lợi|Yêu cầu hồ sơ|Thông tin liên hệ|$)", full_text, re.S)
+        if m_desc:
+            desc_clean = " ".join(m_desc.group(1).split())
+            if len(desc_clean) > 20:
+                job["raw_content"] = desc_clean[:1200]
+                if not job.get("phone"):
+                    job["phone"] = extract_phone(desc_clean)
+    except Exception:
+        pass
+    return job
 
 
 def crawl_vieclamdanang(limit: int = 40) -> List[Dict[str, Any]]:
-    """Thu thập tin tuyển dụng từ trang chủ vieclamdanang.vn."""
+    """Thu thập tin tuyển dụng từ trang chủ + trang chi tiết vieclamdanang.vn."""
     base_url = "https://vieclamdanang.vn/"
-    results: List[Dict[str, Any]] = []
+    raw_jobs: List[Dict[str, Any]] = []
     seen_urls = set()
 
     try:
@@ -193,16 +295,15 @@ def crawl_vieclamdanang(limit: int = 40) -> List[Dict[str, Any]]:
             title = " ".join(a.get_text(" ", strip=True).split())
             if len(title) < 6:
                 continue
-
             seen_urls.add(full_url)
 
-            # Tìm card cha chứa thông tin công ty, lương và logo
             card = a.find_parent("div", class_=lambda c: c and any(k in c for k in ("col-", "job", "item", "box")))
             if card is None:
                 card = a.find_parent("div")
 
             company = "Doanh nghiệp Đà Nẵng"
             salary_raw = "Thỏa thuận"
+            deadline = None
             image_url = None
             card_text = title
 
@@ -213,19 +314,21 @@ def crawl_vieclamdanang(limit: int = 40) -> List[Dict[str, Any]]:
                     p_low = p.lower()
                     if any(k in p_low for k in ("triệu", "thỏa thuận", "thương lượng", "usd", "tr")) and len(p) < 35:
                         salary_raw = p
-                    elif company == "Doanh nghiệp Đà Nẵng" and not re.match(r"^\d{2}/\d{2}/\d{4}$", p) and len(p) > 3:
+                    elif re.match(r"^\d{2}/\d{2}/\d{4}$", p):
+                        deadline = p
+                    elif company == "Doanh nghiệp Đà Nẵng" and len(p) > 3:
                         company = p
 
                 img = card.select_one("img")
                 if img:
                     src = img.get("data-src") or img.get("src")
-                    if src and "logo" not in src.lower() or (src and "upload" in src.lower()):
+                    if src and ("logo" not in src.lower() or "upload" in src.lower()):
                         image_url = urljoin(base_url, src)
 
             sal_min, sal_max, sal_text = parse_salary_range(salary_raw)
             district = normalize_district(f"{title} {card_text}") or "Đà Nẵng"
 
-            results.append(
+            raw_jobs.append(
                 {
                     "title": title,
                     "company": company,
@@ -240,21 +343,75 @@ def crawl_vieclamdanang(limit: int = 40) -> List[Dict[str, Any]]:
                     "posted_time": datetime.now().isoformat(),
                     "image_url": image_url,
                     "phone": extract_phone(card_text),
+                    "address": None,
+                    "work_type": None,
+                    "experience": None,
+                    "deadline": deadline,
+                    "quantity": None,
                 }
             )
-            if len(results) >= limit:
+            if len(raw_jobs) >= limit:
                 break
         except Exception:
             continue
 
-    log.info("Vieclamdanang.vn: thu được %d tin tuyển dụng.", len(results))
-    return results
+    enriched: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_enrich_vieclamdanang_detail, j) for j in raw_jobs]
+        for fut in as_completed(futures):
+            enriched.append(fut.result())
+
+    log.info("Vieclamdanang.vn: thu được %d tin tuyển dụng.", len(enriched))
+    return enriched
+
+
+def _enrich_danang43_detail(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Lấy địa chỉ, quận, mức lương, SĐT từ trang chi tiết danang43.vn."""
+    try:
+        resp = requests.get(job["url"], headers=HEADERS, timeout=10)
+        if not resp.ok:
+            return job
+        soup = BeautifulSoup(resp.text, "html.parser")
+        content_el = soup.select_one("div.content") or soup.select_one("article")
+        if not content_el:
+            return job
+
+        text = " ".join(content_el.get_text(" ", strip=True).split())
+        # Bỏ breadcrumb đầu
+        text = re.sub(r"^Trang chủ\s*/[^/]+/[^.]+\.\s*", "", text)
+        if len(text) > 40:
+            job["raw_content"] = text[:1200]
+
+        m_addr = re.search(r"Địa chỉ:\s*([^|]+?)(?:Quy mô:|Điện thoại:|Email:|Website:|$)", text)
+        if m_addr:
+            addr = m_addr.group(1).strip(" .,-")
+            if len(addr) > 5:
+                job["address"] = addr[:120]
+                dist = normalize_district(addr)
+                if dist:
+                    job["district"] = dist
+
+        if job["district"] == "Đà Nẵng":
+            dist = normalize_district(text)
+            if dist:
+                job["district"] = dist
+
+        s_min, s_max, s_txt = parse_salary_range(text)
+        if s_txt != "Thỏa thuận":
+            job["salary_min_vnd"], job["salary_max_vnd"], job["salary_text"] = s_min, s_max, s_txt
+
+        phone = extract_phone(text)
+        if phone:
+            job["phone"] = phone
+    except Exception:
+        pass
+    return job
 
 
 def crawl_danang43_jobs(limit: int = 30) -> List[Dict[str, Any]]:
-    """Thu thập tin tuyển dụng từ danang43.vn/viec-lam-da-nang."""
+    """Thu thập tin tuyển dụng từ danang43.vn/viec-lam-da-nang + trang chi tiết."""
     url = "https://danang43.vn/viec-lam-da-nang"
-    results: List[Dict[str, Any]] = []
+    raw_jobs: List[Dict[str, Any]] = []
     seen_urls = set()
 
     try:
@@ -280,12 +437,12 @@ def crawl_danang43_jobs(limit: int = 30) -> List[Dict[str, Any]]:
             seen_urls.add(href)
 
             summary = " ".join(art.get_text(" ", strip=True).split())
+            summary = re.sub(r"\s*Xem chi tiết\s*$", "", summary).strip()
             img = art.select_one("img")
             image_url = (img.get("data-src") or img.get("src")) if img else None
             if image_url:
                 image_url = urljoin(url, image_url)
 
-            # Tách tên công ty từ tiêu đề dạng "Tin tuyển dụng, việc làm <Công ty>"
             company = re.sub(
                 r"^(?:tin\s+tuyển\s+dụng[,:\s]*|việc\s+làm[,:\s]*|tuyển\s+dụng[,:\s]*)+",
                 "",
@@ -296,7 +453,7 @@ def crawl_danang43_jobs(limit: int = 30) -> List[Dict[str, Any]]:
             sal_min, sal_max, sal_text = parse_salary_range(summary)
             district = normalize_district(summary) or "Đà Nẵng"
 
-            results.append(
+            raw_jobs.append(
                 {
                     "title": title,
                     "company": company[:80],
@@ -311,15 +468,26 @@ def crawl_danang43_jobs(limit: int = 30) -> List[Dict[str, Any]]:
                     "posted_time": datetime.now().isoformat(),
                     "image_url": image_url,
                     "phone": extract_phone(summary),
+                    "address": None,
+                    "work_type": None,
+                    "experience": None,
+                    "deadline": None,
+                    "quantity": None,
                 }
             )
-            if len(results) >= limit:
+            if len(raw_jobs) >= limit:
                 break
         except Exception:
             continue
 
-    log.info("Danang43.vn: thu được %d tin tuyển dụng.", len(results))
-    return results
+    enriched: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_enrich_danang43_detail, j) for j in raw_jobs]
+        for fut in as_completed(futures):
+            enriched.append(fut.result())
+
+    log.info("Danang43.vn: thu được %d tin tuyển dụng.", len(enriched))
+    return enriched
 
 
 def crawl_all_jobs() -> List[Dict[str, Any]]:
@@ -339,4 +507,7 @@ if __name__ == "__main__":
     jobs = crawl_all_jobs()
     print(f"Total jobs: {len(jobs)}")
     for j in jobs[:5]:
-        print(f" - [{j['source']}] {j['title']} | {j['company']} | {j['salary_text']} | {j['district']}")
+        print(
+            f" - [{j['source']}] {j['title']} | {j['company']} | "
+            f"{j['salary_text']} | {j['district']} | {j.get('address')} | {j.get('work_type')}"
+        )

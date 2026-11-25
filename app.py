@@ -546,12 +546,19 @@ else:
             title = job.get("title") or "Tin tuyển dụng Đà Nẵng"
             company = job.get("company") or "Doanh nghiệp Đà Nẵng"
             salary_text = job.get("salary_text") or "Thỏa thuận"
+            if len(salary_text) > 40:
+                salary_text = "Thỏa thuận"
             district_str = job.get("district") or "Đà Nẵng"
             job_type_str = job.get("job_type") or "Khác"
             time_str = _format_time(job.get("posted_time"))
             source = job.get("source") or "Khác"
             url = job.get("url") or "#"
             phone = job.get("phone")
+            address = job.get("address")
+            work_type = job.get("work_type")
+            experience = job.get("experience")
+            deadline = job.get("deadline")
+            quantity = job.get("quantity")
             image_url = job.get("image_url") or PLACEHOLDER_JOB_IMG
             content = job.get("raw_content") or ""
 
@@ -581,6 +588,20 @@ else:
                         f"<p><span class='price-tag'>💵 {salary_text}</span></p>",
                         unsafe_allow_html=True,
                     )
+
+                    meta_parts = []
+                    if address:
+                        meta_parts.append(f"📌 **Địa điểm:** {address}")
+                    if work_type:
+                        meta_parts.append(f"🕒 **Hình thức:** {work_type}")
+                    if experience:
+                        meta_parts.append(f"🎓 **Kinh nghiệm:** {experience}")
+                    if quantity:
+                        meta_parts.append(f"👥 **Số lượng:** {quantity}")
+                    if deadline:
+                        meta_parts.append(f"⏳ **Hạn nộp:** {deadline}")
+                    if meta_parts:
+                        st.markdown(" • ".join(meta_parts))
 
                     c_phone, c_btn = st.columns([1.5, 1])
                     with c_phone:

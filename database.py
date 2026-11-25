@@ -66,10 +66,27 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 posted_time DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 image_url TEXT,
-                phone TEXT
+                phone TEXT,
+                address TEXT,
+                work_type TEXT,
+                experience TEXT,
+                deadline TEXT,
+                quantity TEXT
             );
             """
         )
+
+        # Auto-migration cột mới cho bảng jobs nếu DB đã tồn tại
+        job_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs);").fetchall()}
+        for col_name, col_type in [
+            ("address", "TEXT"),
+            ("work_type", "TEXT"),
+            ("experience", "TEXT"),
+            ("deadline", "TEXT"),
+            ("quantity", "TEXT"),
+        ]:
+            if col_name not in job_cols:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_type};")
 
         conn.commit()
 
@@ -287,11 +304,13 @@ def insert_job(data: Dict[str, Any], db_path: Path = DB_PATH) -> bool:
     INSERT OR IGNORE INTO jobs (
         title, company, raw_content, salary_text,
         salary_min_vnd, salary_max_vnd, district, job_type,
-        url, source, posted_time, created_at, image_url, phone
+        url, source, posted_time, created_at, image_url, phone,
+        address, work_type, experience, deadline, quantity
     ) VALUES (
         :title, :company, :raw_content, :salary_text,
         :salary_min_vnd, :salary_max_vnd, :district, :job_type,
-        :url, :source, :posted_time, :created_at, :image_url, :phone
+        :url, :source, :posted_time, :created_at, :image_url, :phone,
+        :address, :work_type, :experience, :deadline, :quantity
     );
     """
     payload = {
@@ -309,6 +328,11 @@ def insert_job(data: Dict[str, Any], db_path: Path = DB_PATH) -> bool:
         "created_at": data.get("created_at") or datetime.now().isoformat(),
         "image_url": data.get("image_url"),
         "phone": data.get("phone"),
+        "address": data.get("address"),
+        "work_type": data.get("work_type"),
+        "experience": data.get("experience"),
+        "deadline": data.get("deadline"),
+        "quantity": data.get("quantity"),
     }
     with get_connection(db_path) as conn:
         cursor = conn.execute(sql, payload)
