@@ -84,6 +84,7 @@ def init_db(db_path: Path = DB_PATH) -> None:
             ("experience", "TEXT"),
             ("deadline", "TEXT"),
             ("quantity", "TEXT"),
+            ("is_student", "INTEGER DEFAULT 0"),
         ]:
             if col_name not in job_cols:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_type};")
@@ -305,12 +306,12 @@ def insert_job(data: Dict[str, Any], db_path: Path = DB_PATH) -> bool:
         title, company, raw_content, salary_text,
         salary_min_vnd, salary_max_vnd, district, job_type,
         url, source, posted_time, created_at, image_url, phone,
-        address, work_type, experience, deadline, quantity
+        address, work_type, experience, deadline, quantity, is_student
     ) VALUES (
         :title, :company, :raw_content, :salary_text,
         :salary_min_vnd, :salary_max_vnd, :district, :job_type,
         :url, :source, :posted_time, :created_at, :image_url, :phone,
-        :address, :work_type, :experience, :deadline, :quantity
+        :address, :work_type, :experience, :deadline, :quantity, :is_student
     );
     """
     payload = {
@@ -333,6 +334,7 @@ def insert_job(data: Dict[str, Any], db_path: Path = DB_PATH) -> bool:
         "experience": data.get("experience"),
         "deadline": data.get("deadline"),
         "quantity": data.get("quantity"),
+        "is_student": int(bool(data.get("is_student", 0))),
     }
     with get_connection(db_path) as conn:
         cursor = conn.execute(sql, payload)
@@ -383,6 +385,9 @@ def get_jobs(
             "((COALESCE(salary_max_vnd, salary_min_vnd) >= ?) OR (salary_min_vnd IS NULL AND salary_max_vnd IS NULL))"
         )
         params.append(int(min_salary))
+
+    if filters.get("student_only"):
+        conditions.append("is_student = 1")
 
     if filters.get("has_phone"):
         conditions.append("(phone IS NOT NULL AND length(trim(phone)) >= 9)")

@@ -484,6 +484,12 @@ else:
             job_source_checks[src] = st.checkbox(src, value=True, key=f"job_src_{src}")
         selected_job_sources = [s for s, checked in job_source_checks.items() if checked]
 
+        student_only = st.checkbox(
+            "🎓 Chỉ hiện việc làm cho Sinh viên",
+            value=True,
+            help="Lọc các việc làm bán thời gian, theo ca, phục vụ, pha chế, gia sư, thực tập, CTV hoặc không yêu cầu kinh nghiệm.",
+            key="job_student_only",
+        )
         job_phone_only = st.checkbox("Chỉ hiện tin có Số điện thoại", value=False, key="job_phone_only")
         job_keyword = st.text_input(
             "🔎 Tìm kiếm từ khóa",
@@ -493,6 +499,7 @@ else:
 
     job_filters: Dict[str, Any] = {
         "min_salary": min_salary_tr * 1_000_000,
+        "student_only": student_only,
         "has_phone": job_phone_only,
         "sort_by": JOB_SORT_OPTIONS[job_sort_choice],
         "limit": 200,
@@ -573,11 +580,13 @@ else:
                 with col_img:
                     st.image(image_url, width="stretch")
                 with col_info:
+                    student_badge = "<span class='badge badge-ct'>🎓 Phù hợp Sinh viên</span>" if job.get("is_student") else ""
                     badge_html = f"""
                     <div>
                         <span class="badge {source_badge_class}">🌐 {source}</span>
                         <span class="badge badge-district">📍 {district_str}</span>
                         <span class="badge badge-room">💼 {job_type_str}</span>
+                        {student_badge}
                         <span class="badge badge-district">⏰ {time_str}</span>
                     </div>
                     """

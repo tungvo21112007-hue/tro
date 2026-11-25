@@ -49,6 +49,34 @@ JOB_CATEGORIES = {
 }
 
 
+STUDENT_POSITIVE_KWS = [
+    "sinh viên", "part time", "part-time", "bán thời gian", "theo ca", "xoay ca",
+    "ca sáng", "ca chiều", "ca tối", "linh hoạt", "thời vụ", "ctv", "cộng tác viên",
+    "thực tập", "intern", "phục vụ", "pha chế", "barista", "thu ngân",
+    "gia sư", "trợ giảng", "bán hàng", "làm thêm", "phụ quán", "order", "chạy bàn",
+]
+
+STUDENT_EXCLUDE_KWS = [
+    "trưởng phòng", "giám đốc", "kế toán trưởng", "kỹ sư trưởng",
+    "bằng c", "bằng d", "bằng e", "3 năm kinh nghiệm", "5 năm kinh nghiệm",
+    "2 năm kinh nghiệm", "tuyển gấp thợ",
+]
+
+
+def is_student_job(
+    title: str,
+    content: str = "",
+    work_type: Optional[str] = None,
+    experience: Optional[str] = None,
+) -> bool:
+    """Xác định tin tuyển dụng có phù hợp cho sinh viên làm thêm / part-time / thực tập hay không."""
+    combined = f"{title} {content} {work_type or ''} {experience or ''}".lower()
+    has_explicit = any(kw in combined for kw in ("sinh viên", "part time", "part-time", "bán thời gian", "thực tập", "intern", "theo ca", "xoay ca"))
+    if not has_explicit and any(ex in combined for ex in STUDENT_EXCLUDE_KWS):
+        return False
+    return any(kw in combined for kw in STUDENT_POSITIVE_KWS)
+
+
 def classify_job_type(title: str, content: str = "") -> str:
     """Phân loại ngành nghề dựa trên từ khóa trong tiêu đề và mô tả."""
     combined = f"{title} {content}".lower()
@@ -140,19 +168,27 @@ def _enrich_chotot_detail(job: Dict[str, Any], list_id: Any) -> Dict[str, Any]:
 
 
 def crawl_chotot_jobs(limit: int = 40) -> List[Dict[str, Any]]:
-    """Thu thập tin tuyển dụng tại Đà Nẵng từ Chợ Tốt / Việc Làm Tốt JSON API."""
-    api_url = (
-        f"https://gateway.chotot.com/v1/public/ad-listing"
-        f"?region_v2=3017&cg=13010&limit={limit}&st=s,k"
-    )
+    """Thu thập tin tuyển dụng tại Đà Nẵng từ Chợ Tốt / Việc Làm Tốt JSON API (bao gồm lọc riêng cho sinh viên)."""
+    endpoints = [
+        f"https://gateway.chotot.com/v1/public/ad-listing?region_v2=3017&cg=13010&limit={limit}&st=s,k",
+        "https://gateway.chotot.com/v1/public/ad-listing?region_v2=3017&cg=13010&q=sinh%20vi%C3%AAn&limit=25",
+        "https://gateway.chotot.com/v1/public/ad-listing?region_v2=3017&cg=13010&q=b%C3%A1n%20th%E1%BB%9Di%20gian&limit=25",
+        "https://gateway.chotot.com/v1/public/ad-listing?region_v2=3017&cg=13010&q=ph%E1%BB%A5c%20v%E1%BB%A5&limit=25",
+    ]
     results: List[Tuple[Dict[str, Any], Any]] = []
-    try:
-        resp = requests.get(api_url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
-        ads = resp.json().get("ads", [])
-    except Exception as e:
-        log.warning("Lỗi gọi API Việc Làm Tốt (Chợ Tốt): %s", e)
-        return []
+    seen_ids = set()
+    ads: List[Dict[str, Any]] = []
+    for api_url in endpoints:
+        try:
+            resp = requests.get(api_url, headers=HEADERS, timeout=TIMEOUT)
+            resp.raise_for_status()
+            for ad in resp.json().get("ads", []):
+                lid = ad.get("list_id")
+                if lid and lid not in seen_ids:
+                    seen_ids.add(lid)
+                    ads.append(ad)
+        except Exception as e:
+            log.warning("Lỗi gọi API Việc Làm Tốt (%s): %s", api_url, e)
 
     for ad in ads:
         try:
@@ -498,6 +534,15 @@ def crawl_all_jobs() -> List[Dict[str, Any]]:
             all_jobs.extend(fn())
         except Exception as e:
             log.error("Lỗi crawler việc làm %s: %s", fn.__name__, e)
+
+    for job in all_jobs:
+        job["is_student"] = 1 if is_student_job(
+            job.get("title", ""),
+            job.get("raw_content", ""),
+            job.get("work_type"),
+            job.get("experience"),
+        ) else 0
+
     log.info("Tổng cộng thu thập được %d tin việc làm Đà Nẵng.", len(all_jobs))
     return all_jobs
 
