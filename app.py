@@ -26,6 +26,10 @@ try:
 except Exception:
     pass
 
+import importlib
+import database as _db_mod
+if not hasattr(_db_mod, "get_jobs"):
+    importlib.reload(_db_mod)
 from database import get_jobs, get_rentals, init_db
 
 # ── Page config ──────────────────────────────────────────────────────
